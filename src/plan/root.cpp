@@ -730,7 +730,7 @@ namespace aris::plan
 			if (param.active_motor[i])
 			{
 				double p, v, a;
-				aris::plan::moveAbsolute(target.count, param.axis_begin_pos_vec[i], param.axis_pos_vec[i], param.axis_vel_vec[i] / 1000
+				aris::plan::moveAbsolute(static_cast<double>(target.count), param.axis_begin_pos_vec[i], param.axis_pos_vec[i], param.axis_vel_vec[i] / 1000
 					, param.axis_acc_vec[i] / 1000 / 1000, param.axis_dec_vec[i] / 1000 / 1000, p, v, a, param.total_count_vec[i]);
 				target.controller->motionAtAbs(i).setTargetPos(p);
 			}
@@ -778,7 +778,7 @@ namespace aris::plan
 		}, p, std::ref(target));
 
 		target.param = p;
-		for (auto &option : target.mot_options) option |= NOT_CHECK_ENABLE;
+		for (auto &option : target.mot_options) option |= NOT_CHECK_ENABLE | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER;
 
 		std::vector<std::pair<std::string, std::any>> ret_value;
 		target.ret = ret_value;
@@ -787,7 +787,7 @@ namespace aris::plan
 	{
 		auto param = std::any_cast<std::shared_ptr<RecoverParam> &>(target.param);
 
-		if (target.count == 1)
+		if (target.count < 3)
 		{
 			for (Size i = 0; i < std::min(target.controller->motionPool().size(), target.model->motionPool().size()); ++i)
 			{
@@ -1672,7 +1672,7 @@ namespace aris::plan
 	auto SetXml::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
 	{		
 		// remove all symbols "{" "}"
-		if (target.server->running())THROW_FILE_LINE("server is not running,can't save xml");
+		if (target.server->running())THROW_FILE_LINE("server is running, can't set xml");
 		auto xml_str = params.at("xml").substr(1, params.at("xml").size() - 2);
 		// 这一句要小心，此时 this 已被销毁，后面不能再调用this了 //
 		target.server->loadXmlStr(xml_str);

@@ -22,6 +22,30 @@ void PIDcalTeo(double m, double h, double ts, double overshoot, double *KP, doub
 	KP[0] = 2 * kesi * omega * m - h;
 }
 
+
+auto f(aris::dynamic::Model *m, double *A)
+{
+	auto &s = dynamic_cast<aris::dynamic::ForwardKinematicSolver&>(m->solverPool()[1]);
+	s.kinPos();
+	s.kinVel();
+	s.cptGeneralInverseDynamicMatrix();
+	s.cptJacobiWrtEE();
+
+	// J_inv
+	double U[36], tau[6], J_inv[36], tau2[6];
+	aris::Size p[6], rank;
+	s_householder_utp(6, 6, s.Jf(), U, tau, p, rank, 1e-7);
+	s_householder_utp2pinv(6, 6, rank, U, tau, p, J_inv, tau2, 1e-7);
+
+	// M = (M + I) * J_inv 
+	double M[36], tem[36];
+	s_mc(6, 6, s.M(), s.nM(), M, 6);
+	for (int i = 0; i < 6; ++i)M[at(i, i, 6)] += m->motionPool()[i].frcCoe()[2];
+	s_mm(6, 6, 6, M, J_inv, tem);
+	s_mm(6, 6, 6, J_inv, T(6), tem, 6, A, 6);
+}
+
+
 int main(int argc, char *argv[])
 {
 	double robot_pm[16];
@@ -66,7 +90,7 @@ int main(int argc, char *argv[])
 		//cs.model().solverPool()[0].kinPos();
 
 		//cs.saveXmlFile("C:\\Users\\py033\\Desktop\\stewart.xml");
-		
+
 		//cs.loadXmlFile(ARIS_INSTALL_PATH + std::string("/resource/demo_server/stewart.xml"));
 	}
 	else
@@ -83,6 +107,8 @@ int main(int argc, char *argv[])
 	//double KPV[7] = { 100,100,0,4,4,4,0 };
 	//double KIV[7] = { 50,50,  0,1,1,1,0 };
 
+	std::cout << cs.controller().xmlString() << std::endl;
+
 	auto &m = cs.model();
 	double mp[6]{ 0,0,0,0,1.57,0 };
 	double mv[6]{ 0.001,0.02,0.01,0.04,0.01,0.02 };
@@ -92,23 +118,20 @@ int main(int argc, char *argv[])
 		mot.setMp(mp[mot.id()]);
 		mot.setMv(mv[mot.id()]);
 		mot.setMa(ma[mot.id()]);
-	} 
+	}
+
+	double pq[7]{0.1370, 0.345, 0.279968, 0, -1, 0, 0};
+	m.generalMotionPool()[0].setMpq(pq);
+	m.solverPool()[0].kinPos();
+	
+	std::cout << m.xmlString() << std::endl;
 
 	auto &s = dynamic_cast<aris::dynamic::ForwardKinematicSolver&>(m.solverPool()[1]);
 	s.kinPos();
 	s.kinVel();
-	s.dynAccAndFce();
 	s.cptGeneralInverseDynamicMatrix();
-	s.cptJacobi();
+	s.cptJacobiWrtEE();
 	
-	// clear frc //
-	for (int i = 0; i < 6; ++i) 
-	{
-		double frc[3]{0,0,0};
-		frc[2] = m.motionPool()[i].frcCoe()[2];
-		m.motionPool()[i].setFrcCoe(frc);
-	}
-
 	// J_inv
 	double U[36], tau[6], J_inv[36], tau2[6];
 	aris::Size p[6], rank;
@@ -122,11 +145,16 @@ int main(int argc, char *argv[])
 	s_mm(6, 6, 6, M, J_inv, tem);
 	s_mm(6, 6, 6, J_inv, T(6), tem, 6, A, 6);
 
+	dsp(6, 6, A);
+
+	f(&cs.model(), M);
+	dsp(6, 6, M);
+
 	// cout torque 
 	double mf[6];
 	for (int i = 0; i < 6; ++i)tem[i] = m.motionPool()[i].mf();
 	s_mm(6, 1, 6, J_inv, T(6), tem, 1, mf, 1);
-	dsp(1, 6, mf);
+	//dsp(1, 6, mf);
 
 	// h = -M * c + h
 	double h[6];
@@ -136,7 +164,7 @@ int main(int argc, char *argv[])
 	double ee_as[6];
 	m.generalMotionPool()[0].getMas(ee_as);
 	s_mma(6, 1, 6, A, ee_as, h);
-	dsp(1, 6, h);
+	//dsp(1, 6, h);
 
 	// 
 	double max_value[6]{ 0,0,0,0,0,0 };
@@ -158,7 +186,7 @@ int main(int argc, char *argv[])
 	for (int i = 0; i < 6; ++i)
 	{
 		PIDcalOne(max_value[i], 0.2, kpp + i);
-		PIDcalTeo(max_value[i], 0, 0.4, 0.0433, kpv + i, kiv + i);
+		PIDcalTeo(max_value[i], 0, 0.25, 0.0433, kpv + i, kiv + i);
 	}
 
 	dsp(1, 6, kpp);
@@ -237,7 +265,7 @@ int main(int argc, char *argv[])
 	}, [&](const aris::plan::PlanTarget &param)->int
 	{
 		param.controller->motionAtAbs(0).setTargetPos(param.count*0.002);
-		return 100 - param.count;
+		return 100LL - param.count;
 	}, [&](aris::plan::PlanTarget &)->void
 	{
 		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
@@ -264,10 +292,10 @@ int main(int argc, char *argv[])
 	}
 	cs.planRoot().planPool().add<aris::plan::MoveSeries>("move_series");
 
-	/*
+	
 	auto ec_ptr = std::make_unique<aris::control::EthercatController>();
 	ec_ptr->setEsiDirs({
-		std::filesystem::path("C:\\Users\\py033\\Desktop\\esi_dirs"),
+		std::filesystem::path(""),
 		std::filesystem::path("C:\\Users\\py033\\Desktop\\esi_dirs\\Beckhoff AX5xxx")
 		});
 
@@ -281,7 +309,6 @@ int main(int argc, char *argv[])
 	std::cout << ec_ptr->getDeviceList() << std::endl;
 	std::cout << ec_ptr->getPdoList(0x000002E1, 0x00, 0x29001) << std::endl;
 	std::cout << ec_ptr->getPdoList(0x0000009A, 0x00030924, 0x000103f4) << std::endl;
-	*/
 
 	// interaction //
 	cs.interfacePool().add<aris::server::WebInterface>("", "5866", aris::core::Socket::WEB);

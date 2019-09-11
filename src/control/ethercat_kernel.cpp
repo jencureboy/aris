@@ -13,12 +13,69 @@ extern "C"
 
 #include "aris/control/ethercat_kernel.hpp"
 #include "aris/control/ethercat.hpp"
+#include "aris/control/rt_timer.hpp"
 #include "aris/core/log.hpp"
 
 namespace aris::control
 {
 	const unsigned char FF = std::uint8_t(0xff);
 	
+	// 没有 offset 的版本
+	void read_bit2(char *data, int bit_size, const char *pd, int bit_position)
+	{
+		// data:
+		//            bit_size                                                
+		//   7 6 5 4     3      2 1 0 | 7 6 5 4 3 2 1 0 | ... | 7 6 5 4 3 2 1 0 |
+		// 
+		// pd:
+		//                   offset          bit_position  
+		//   0 1 2 3 4 5 6 7   |    0 1 2 3       4       5 6 7 | ...  
+		//   
+
+
+		// 注意 >>在某些编译器下，是补符号位，因此必须先转换成uint8
+		for (int i = 0; i < bit_size / 8; ++i)
+		{
+			data[i] = (pd[i] >> bit_position) | (std::uint8_t(pd[i + 1]) << (8 - bit_position));
+		}
+
+		if (bit_size % 8)
+		{
+			// 先将还没弄好的位置零 //
+			data[bit_size / 8] &= FF << bit_size % 8;
+			data[bit_size / 8] |= (pd[bit_size / 8] >> bit_position) & (0xff >> (8 - bit_size % 8));
+			if (bit_size % 8 > 8 - bit_position)
+				data[bit_size / 8] |= (std::uint8_t(pd[bit_size / 8 + 1]) << (8 - bit_position)) & (0xff >> (8 - bit_size % 8));
+
+		}
+	}
+	void write_bit2(const char *data, int bit_size, char *pd, int bit_position)
+	{
+		for (int i = 0; i < bit_size / 8; ++i)
+		{
+			pd[i] &= FF >> (8 - bit_position);
+			pd[i] |= std::uint8_t(data[i]) << bit_position;
+			pd[i + 1] &= FF << bit_position;
+			pd[i + 1] |= std::uint8_t(data[i]) >> (8 - bit_position);
+		}
+
+		if (bit_size % 8)
+		{
+			if (bit_size % 8 > 8 - bit_position)
+			{
+				pd[bit_size / 8] &= FF >> (8 - bit_position);
+				pd[bit_size / 8] |= std::uint8_t(data[bit_size / 8]) << bit_position;
+				pd[bit_size / 8 + 1] &= FF << ((bit_size % 8) - (8 - bit_position));
+				pd[bit_size / 8 + 1] |= std::uint8_t(data[bit_size / 8] & (0xff >> (8 - bit_size % 8))) >> (8 - bit_position);
+			}
+			else
+			{
+				pd[bit_size / 8] &= ~(std::uint8_t(FF << (8 - bit_position - (bit_size % 8)) >> (8 - (bit_size % 8))) << bit_position);
+				pd[bit_size / 8] |= std::uint8_t((FF >> (8 - (bit_size % 8))) & data[bit_size / 8]) << bit_position;
+			}
+		}
+	}
+
 	void read_bit2(char *data, int bit_size, const char *pd, int offset, int bit_position)
 	{
 		// data:
@@ -209,7 +266,11 @@ namespace aris::control
 	};
 	struct PdoEntryHandle
 	{
-		std::uint32_t offset;
+		union 
+		{
+			std::uint32_t offset_;
+			char *data_;
+		};
 		std::uint32_t bit_position;
 	};
 
@@ -264,7 +325,7 @@ namespace aris::control
 							auto &pe_handle = std::any_cast<PdoEntryHandle&>(entry.ecHandle());
 
 							//etherlab 会根据index是否为0来判断是否结束
-							if (entry.index())ec_pdo_entry_reg_vec.push_back(ec_pdo_entry_reg_t{ 0x00, slave.phyId(), slave.vendorID(), slave.productCode(), entry.index(), entry.subindex(), &pe_handle.offset, &pe_handle.bit_position });
+							if (entry.index())ec_pdo_entry_reg_vec.push_back(ec_pdo_entry_reg_t{ 0x00, slave.phyId(), slave.vendorID(), slave.productCode(), entry.index(), entry.subindex(), &pe_handle.offset_, &pe_handle.bit_position });
 							ec_pdo_entry_info_vec_vec_vec.back().back().push_back(ec_pdo_entry_info_t{ entry.index(), entry.subindex(), static_cast<std::uint8_t>(entry.bitSize()) });
 						}
 
@@ -286,7 +347,7 @@ namespace aris::control
 				if (ecrt_slave_config_pdos(s_handle.ec_slave_config_, ec_sync_info_vec.size(), ec_sync_info_vec.data()))THROW_FILE_LINE("failed to slave config pdos");
 
 				// Configure the slave's distributed clock
-				if (slave.dcAssignActivate())ecrt_slave_config_dc(s_handle.ec_slave_config_, slave.dcAssignActivate(), 1000000, 4400000, 0, 0);
+				if (slave.dcAssignActivate())ecrt_slave_config_dc(s_handle.ec_slave_config_, slave.dcAssignActivate(), master->samplePeriodNs(), 500000, 0, 0);
 
 				slave.ecHandle() = s_handle;
 			}
@@ -313,8 +374,11 @@ namespace aris::control
 						{
 							if (entry.index())
 							{
+								auto &pe_handle = std::any_cast<PdoEntryHandle&>(entry.ecHandle());
+								pe_handle.data_ = (char*)std::any_cast<MasterHandle&>(master->ecHandle()).domain_pd_ + pe_handle.offset_;
+								
 								std::vector<char> value(entry.bitSize() / 8 + 1, 0);
-								aris_ecrt_pdo_write(&entry, value.data(), entry.bitSize());
+								aris_ecrt_pdo_write(&entry, value.data());
 							}
 						}
 					}
@@ -386,8 +450,6 @@ namespace aris::control
 						}
 					}
 				}
-
-
 			}
 		}
 		*/
@@ -406,26 +468,35 @@ namespace aris::control
 		ecrt_master_deactivate(std::any_cast<MasterHandle&>(master->ecHandle()).ec_master_);
 		ecrt_release_master(std::any_cast<MasterHandle&>(master->ecHandle()).ec_master_);
 	}
-	auto aris_ecrt_master_sync(EthercatMaster *mst, std::uint64_t ns)->void
-	{
-		ecrt_master_application_time(std::any_cast<MasterHandle&>(mst->ecHandle()).ec_master_, ns);
-		ecrt_master_sync_reference_clock(std::any_cast<MasterHandle&>(mst->ecHandle()).ec_master_);
-		ecrt_master_sync_slave_clocks(std::any_cast<MasterHandle&>(mst->ecHandle()).ec_master_);
-	}
 	auto aris_ecrt_master_recv(EthercatMaster *mst)->void
 	{
-		ecrt_master_receive(std::any_cast<MasterHandle&>(mst->ecHandle()).ec_master_);
-		ecrt_domain_process(std::any_cast<MasterHandle&>(mst->ecHandle()).domain_);
-	}
-	auto aris_ecrt_master_send(EthercatMaster *mst)->void
-	{
+		auto &m_handle = std::any_cast<MasterHandle&>(mst->ecHandle());
+		
 		ec_master_state_t ms;
-		ecrt_master_state(std::any_cast<MasterHandle&>(mst->ecHandle()).ec_master_, &ms);
+		ecrt_master_state(m_handle.ec_master_, &ms);
 
 		if (ms.link_up)
 		{
-			ecrt_domain_queue(std::any_cast<MasterHandle&>(mst->ecHandle()).domain_);
-			ecrt_master_send(std::any_cast<MasterHandle&>(mst->ecHandle()).ec_master_);
+			ecrt_master_receive(m_handle.ec_master_);
+			ecrt_domain_process(m_handle.domain_);
+		}
+	}
+	auto aris_ecrt_master_send(EthercatMaster *mst)->void
+	{
+		auto &m_handle = std::any_cast<MasterHandle&>(mst->ecHandle());
+		
+		ec_master_state_t ms;
+		ecrt_master_state(m_handle.ec_master_, &ms);
+
+		if (ms.link_up)
+		{
+			ecrt_domain_queue(m_handle.domain_);
+
+			ecrt_master_application_time(m_handle.ec_master_, aris_rt_timer_read());
+			ecrt_master_sync_reference_clock(m_handle.ec_master_);
+			ecrt_master_sync_slave_clocks(m_handle.ec_master_);
+
+			ecrt_master_send(m_handle.ec_master_);
 		}
 	}
 
@@ -438,19 +509,15 @@ namespace aris::control
 		}
 	}
 
-	auto aris_ecrt_pdo_read(PdoEntry *entry, void *data, int bit_size)->void
+	auto aris_ecrt_pdo_read(PdoEntry *entry, void *data)->void
 	{
-		auto pd = std::any_cast<MasterHandle&>(entry->ancestor<EthercatMaster>()->ecHandle()).domain_pd_;
 		auto &pe_handle = std::any_cast<PdoEntryHandle&>(entry->ecHandle());
-
-		read_bit2(reinterpret_cast<char*>(data), bit_size, reinterpret_cast<const char*>(pd), pe_handle.offset, pe_handle.bit_position);
+		read_bit2(reinterpret_cast<char*>(data), entry->bitSize(), pe_handle.data_, pe_handle.bit_position);
 	}
-	auto aris_ecrt_pdo_write(PdoEntry *entry, const void *data, int bit_size)->void
+	auto aris_ecrt_pdo_write(PdoEntry *entry, const void *data)->void
 	{
-		auto pd = std::any_cast<MasterHandle&>(entry->ancestor<EthercatMaster>()->ecHandle()).domain_pd_;
 		auto &pe_handle = std::any_cast<PdoEntryHandle&>(entry->ecHandle());
-
-		write_bit2(reinterpret_cast<const char*>(data), bit_size, reinterpret_cast<char*>(pd), pe_handle.offset, pe_handle.bit_position);
+		write_bit2(reinterpret_cast<const char*>(data), entry->bitSize(), pe_handle.data_, pe_handle.bit_position);
 	}
 
 	auto aris_ecrt_sdo_config(std::any& master, std::any& slave, std::uint16_t index, std::uint8_t subindex,
@@ -473,13 +540,12 @@ namespace aris::control
 	auto aris_ecrt_scan(EthercatMaster *master)->int { return 0; }
 	auto aris_ecrt_master_request(EthercatMaster *master)->void {}
 	auto aris_ecrt_master_stop(EthercatMaster *master)->void {}
-	auto aris_ecrt_master_sync(EthercatMaster *master, std::uint64_t ns)->void {}
 	auto aris_ecrt_master_recv(EthercatMaster *master)->void {}
 	auto aris_ecrt_master_send(EthercatMaster *master)->void {}
 	auto aris_ecrt_master_link_state(EthercatMaster* mst, EthercatMaster::MasterLinkState *ms, EthercatMaster::SlaveLinkState *ss)->void {}
 
-	auto aris_ecrt_pdo_read(PdoEntry *entry, void *data, int byte_size)->void {}
-	auto aris_ecrt_pdo_write(PdoEntry *entry, const void *data, int byte_size)->void {}
+	auto aris_ecrt_pdo_read(PdoEntry *entry, void *data)->void {}
+	auto aris_ecrt_pdo_write(PdoEntry *entry, const void *data)->void {}
 	auto aris_ecrt_sdo_read(std::any& master, std::uint16_t slave_position, std::uint16_t index, std::uint8_t subindex,
 		std::uint8_t *to_buffer, std::size_t buffer_size, std::size_t *result_size, std::uint32_t *abort_code) ->int {
 		return 0;

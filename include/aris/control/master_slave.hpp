@@ -46,10 +46,14 @@ namespace aris::control
 		static auto Type()->const std::string & { static const std::string type("Master"); return std::ref(type); }
 		auto virtual type() const->const std::string& override { return Type(); }
 		auto virtual loadXml(const aris::core::XmlElement &xml_ele)->void override;
+		auto virtual saveXml(aris::core::XmlElement &xml_ele) const->void override;
+
 		// used only in non-rt thread //
 		auto start()->void;
 		auto stop()->void;
 		auto setControlStrategy(std::function<void()> strategy)->void;
+		auto setSamplePeriodNs(int period_ns);
+		auto samplePeriodNs()const ->int;
 
 		// used in rt thread //
 		auto logFile(const char *file_name)->void;
@@ -76,7 +80,6 @@ namespace aris::control
 		auto virtual init()->void {}
 		auto virtual send()->void { for (auto &s : slavePool())s.send(); }
 		auto virtual recv()->void { for (auto &s : slavePool())s.recv(); }
-		auto virtual sync()->void {}
 		auto virtual release()->void {}
 
 	private:
