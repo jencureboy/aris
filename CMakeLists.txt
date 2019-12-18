@@ -47,7 +47,12 @@ if(UNIX)
 		add_definitions(-DARIS_USE_ETHERLAB)
 		set(RELY_INCL_DIR "/opt/etherlab/include" ${RELY_INCL_DIR})
 		set(RELY_LINK_DIR "/opt/etherlab/lib" ${RELY_LINK_DIR})
-		set(RELY_LINK_LIB ethercat_rtdm ${RELY_LINK_LIB})
+		if(USE_XENOMAI)
+			set(RELY_LINK_LIB ethercat_rtdm ${RELY_LINK_LIB})
+		else(USE_XENOMAI)
+			set(RELY_LINK_LIB ethercat ${RELY_LINK_LIB})
+		endif(USE_XENOMAI)
+		
 	endif(USE_ETHERLAB)
 endif(UNIX)
 if(WIN32)
@@ -72,7 +77,7 @@ add_definitions(-DARIS_INSTALL_PATH="${CMAKE_INSTALL_PREFIX}")
 ## build targets ##
 foreach(target robot server plan dynamic control sensor core)
 	file(GLOB HEADERS include/aris/${target}/*.hpp include/aris/${target}/*.h)
-	file(GLOB SOURCES src/${target}/*.cpp src/${target}/*.hpp src/${target}/*.h ${HEADERS})
+	file(GLOB SOURCES src/${target}/*.cpp src/${target}/*.c src/${target}/*.hpp src/${target}/*.h ${HEADERS})
 	add_library(aris_${target} STATIC ${HEADERS} ${SOURCES})
 	target_include_directories(aris_${target}
 		PUBLIC 

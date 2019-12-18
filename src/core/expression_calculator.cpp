@@ -352,42 +352,58 @@ namespace aris::core
 
 	std::string SeperateString(const std::string &s)
 	{
-		static const std::string seperateOpr("+-*/^()[]{},;");
-		std::string ret;
+		static const std::string seperateStr("()[]{},;");
+		static const std::string operatorStr("+-*/\\^|<>=");
 
-		for (const char &key : s)
+		std::string ret;
+		ret.reserve(2 * s.size());
+
+		for (int i = 0; i < s.size(); ++i)
 		{
+			auto &key = s[i];
+
 			// 判断是否为科学计数法的数字 //
-			if ((&key > s.data() + 1) && (&key<s.data() + s.size() - 2))
+			if ((i > 1) && (i < s.size() - 1))
 			{
 				if ((key == '+') || (key == '-'))
 				{
-					if ((*(&key - 1) == 'e')
+					if (((*(&key - 1) == 'e') || (*(&key - 1) == 'E'))
 						&& (*(&key - 2) <= '9')
 						&& (*(&key - 2) >= '0')
 						&& (*(&key + 1) <= '9')
 						&& (*(&key + 1) >= '0'))
 					{
 						ret += key;
+						ret += s[i + 1];
+						++i;
 						continue;
 					}
 				}
 			}
 
-
-			if (seperateOpr.find(key) != seperateOpr.npos)
+			// 判断是否为分隔符 //
+			if (seperateStr.find(key) != seperateStr.npos)
 			{
 				ret = ret + " " + key + " ";
+			}
+			// 判断是否为符号，或者变量数字
+			else if ((i > 0) && (s[i-1] != ' ') && ((operatorStr.find(key) == operatorStr.npos) != (operatorStr.find(s[i - 1]) == operatorStr.npos)))
+			{
+				ret = ret + " " + key;
 			}
 			else
 			{
 				ret += key;
 			}
 		}
+
+		//std::cout << ret << std::endl;
+
+
 		return ret;
 	}
 
-	Calculator::TokenVec Calculator::Expression2Tokens(const std::string &expression)const
+	auto Calculator::Expression2Tokens(const std::string &expression)const -> Calculator::TokenVec
 	{
 		std::stringstream stream(SeperateString(expression));
 
@@ -445,19 +461,13 @@ namespace aris::core
 
 		return tokens;
 	}
-	Matrix Calculator::CaculateTokens(TokenVec::iterator beginToken, TokenVec::iterator endToken) const
+	auto Calculator::CaculateTokens(TokenVec::iterator beginToken, TokenVec::iterator endToken) const ->Matrix
 	{
-		if (beginToken >= endToken)
-		{
-			THROW_FILE_LINE("invalid expression");
-		}
+		if (beginToken >= endToken)THROW_FILE_LINE("invalid expression");
 
 		auto i = beginToken;
-
 		Matrix value;
-
 		bool isBegin = true;
-
 		while (i < endToken)
 		{
 			// 如果没有当前值,证明刚刚开始计算 //
@@ -520,7 +530,7 @@ namespace aris::core
 		return value;
 	}
 
-	Matrix Calculator::CaculateValueInParentheses(TokenVec::iterator &i, TokenVec::iterator maxEndToken)const
+	auto Calculator::CaculateValueInParentheses(TokenVec::iterator &i, TokenVec::iterator maxEndToken)const->Matrix
 	{
 		auto beginPar = i + 1;
 		auto endPar = FindNextOutsideToken(i + 1, maxEndToken, Token::PARENTHESIS_R);
@@ -528,7 +538,7 @@ namespace aris::core
 
 		return CaculateTokens(beginPar, endPar);
 	}
-	Matrix Calculator::CaculateValueInBraces(TokenVec::iterator &i, TokenVec::iterator maxEndToken)const
+	auto Calculator::CaculateValueInBraces(TokenVec::iterator &i, TokenVec::iterator maxEndToken)const->Matrix
 	{
 		auto beginBce = i + 1;
 		auto endBce = FindNextOutsideToken(i + 1, maxEndToken, Token::BRACE_R);
@@ -536,7 +546,7 @@ namespace aris::core
 
 		return combineMatrices(GetMatrices(beginBce, endBce));
 	}
-	Matrix Calculator::CaculateValueInFunction(TokenVec::iterator &i, TokenVec::iterator maxEndToken)const
+	auto Calculator::CaculateValueInFunction(TokenVec::iterator &i, TokenVec::iterator maxEndToken)const->Matrix
 	{
 		auto beginPar = i + 1;
 		if (i + 1 >= maxEndToken) THROW_FILE_LINE("invalid expression");
@@ -554,7 +564,7 @@ namespace aris::core
 		i = endPar + 1;
 		return f->second(params);
 	}
-	Matrix Calculator::CaculateValueInOperator(TokenVec::iterator &i, TokenVec::iterator maxEndToken)const
+	auto Calculator::CaculateValueInOperator(TokenVec::iterator &i, TokenVec::iterator maxEndToken)const->Matrix
 	{
 		auto opr = i;
 		i = FindNextEqualLessPrecedenceBinaryOpr(opr + 1, maxEndToken, opr->opr->priority_ul);
@@ -699,6 +709,42 @@ namespace aris::core
 		operator_map_["-"].SetUnaryLeftOpr(1, [](Matrix m) {return -m; });
 		operator_map_["*"].SetBinaryOpr(2, [](Matrix m1, Matrix m2) {return m1 * m2; });
 		operator_map_["/"].SetBinaryOpr(2, [](Matrix m1, Matrix m2) {return m1 / m2; });
+		
+#define MATRIX_OPR(OPR) \
+		Matrix ret;\
+		if (m1.size() == 1)\
+		{					\
+			ret = Matrix(m2);\
+			for (auto &d : ret)d = m1(0, 0) OPR d;\
+		}\
+		else if (m2.size() == 1)\
+		{\
+			ret = Matrix(m1);\
+			for (auto &d : ret) d = d OPR m2(0, 0);\
+		}\
+		else if ((m1.m() == m2.m()) && (m1.n() == m2.n()))\
+		{\
+			ret = Matrix(m1);\
+								\
+			for (Size i = 0; i < ret.size(); ++i)\
+			{\
+				ret.data()[i] = m1.data()[i] OPR m2.data()[i];\
+			}\
+		}\
+		else\
+		{\
+			THROW_FILE_LINE("dimensions are not equal");\
+		}\
+		return ret;
+		
+		
+		operator_map_["<"].SetBinaryOpr(1, [](Matrix m1, Matrix m2) { MATRIX_OPR(<);});
+		operator_map_["<="].SetBinaryOpr(1, [](Matrix m1, Matrix m2) { MATRIX_OPR(<=); });
+		operator_map_[">"].SetBinaryOpr(1, [](Matrix m1, Matrix m2) { MATRIX_OPR(>); });
+		operator_map_[">="].SetBinaryOpr(1, [](Matrix m1, Matrix m2) { MATRIX_OPR(>=); });
+		operator_map_["=="].SetBinaryOpr(1, [](Matrix m1, Matrix m2) { MATRIX_OPR(== ); });
+
+#undef ARIS_SET_TYPE
 
 		addFunction("sqrt", [](std::vector<Matrix> v)
 		{
