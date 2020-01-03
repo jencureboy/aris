@@ -62,8 +62,8 @@ namespace aris::server
 		auto open()->void;
 		auto close()->void;
 		auto runCmdLine()->void;
-		auto executeCmd(const aris::core::Msg &cmd_string, std::function<void(aris::plan::Plan&)> post_callback = nullptr)->std::shared_ptr<aris::plan::Plan>;
-		auto executeCmdInCmdLine(const aris::core::Msg &cmd_string, std::function<void(aris::plan::Plan&)> post_callback = nullptr)->std::shared_ptr<aris::plan::Plan>;
+		auto executeCmd(std::string_view cmd_str, std::function<void(aris::plan::Plan&)> post_callback = nullptr)->std::shared_ptr<aris::plan::Plan>;
+		auto executeCmdInCmdLine(std::string_view cmd_string, std::function<void(aris::plan::Plan&)> post_callback = nullptr)->std::shared_ptr<aris::plan::Plan>;
 		auto start()->void;
 		auto stop()->void;
 		auto currentExecutePlan()->std::shared_ptr<aris::plan::Plan>;
@@ -71,6 +71,9 @@ namespace aris::server
 		auto waitForAllExecution()->void;
 		auto waitForAllCollection()->void;
 		auto getRtData(const std::function<void(ControlServer&, const aris::plan::Plan *target, std::any&)>& get_func, std::any& data)->void;
+		auto errorCode()const->int;
+		auto errorMsg()const->const char *;
+		auto clearError()->void;
 
 		ARIS_REGISTER_TYPE(ControlServer);
 

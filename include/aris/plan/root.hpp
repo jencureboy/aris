@@ -52,6 +52,7 @@ namespace aris::plan
 			USE_OFFSET_VEL = 0x01ULL << 19,
 			USE_OFFSET_TOQ = 0x01ULL << 20,
 
+			NOT_CHECK_MODE = 0x01ULL << 22,
 			NOT_CHECK_ENABLE = 0x01ULL << 23,
 			NOT_CHECK_POS_MIN = 0x01ULL << 24,
 			NOT_CHECK_POS_MAX = 0x01ULL << 25,
@@ -64,7 +65,7 @@ namespace aris::plan
 			NOT_CHECK_VEL_CONTINUOUS = 0x01ULL << 33,
 			NOT_CHECK_VEL_FOLLOWING_ERROR = 0x01ULL << 35,
 
-			CHECK_NONE = NOT_CHECK_ENABLE | NOT_CHECK_POS_MIN | NOT_CHECK_POS_MAX | NOT_CHECK_POS_CONTINUOUS | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | NOT_CHECK_POS_FOLLOWING_ERROR | 
+			CHECK_NONE = NOT_CHECK_MODE | NOT_CHECK_ENABLE | NOT_CHECK_POS_MIN | NOT_CHECK_POS_MAX | NOT_CHECK_POS_CONTINUOUS | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | NOT_CHECK_POS_FOLLOWING_ERROR |
 				NOT_CHECK_VEL_MIN | NOT_CHECK_VEL_MAX | NOT_CHECK_VEL_CONTINUOUS | NOT_CHECK_VEL_FOLLOWING_ERROR, 
 		};
 		enum RetStatus
@@ -74,6 +75,8 @@ namespace aris::plan
 			COLLECT_EXCEPTION = -2,
 			PARSE_EXCEPTION = -3,
 			PLAN_CANCELLED = -4,
+			EXECUTE_EXCEPTION = -5,
+			PROGRAM_EXCEPTION = -50,
 			SLAVE_AT_INIT = -101,
 			SLAVE_AT_SAFEOP = -102,
 			SLAVE_AT_PREOP = -103,
@@ -107,14 +110,26 @@ namespace aris::plan
 		auto controller()->aris::control::Controller*;
 		auto ecMaster()->aris::control::EthercatMaster*;
 		auto ecController()->aris::control::EthercatController*;
+		auto sharedPtrForThis()->std::shared_ptr<Plan>;
 		auto option()->std::uint64_t&;
 		auto motorOptions()->std::vector<std::uint64_t>&;
-		auto cmdString()->const std::string&;
-		auto cmdName()->const std::string&;
-		auto cmdParams()->const std::map<std::string, std::string> &;
+		auto cmdString()->std::string_view;
+		auto cmdName()->std::string_view;
+		auto cmdParams()->const std::map<std::string_view, std::string_view> &;
 		auto cmdId()->std::int64_t;
 		auto beginGlobalCount()->std::int64_t;
 		auto rtStastic()->aris::control::Master::RtStasticsData &;
+		auto lout()->aris::core::MsgStream & { return master()->lout(); }
+		auto mout()->aris::core::MsgStream & { return master()->mout(); }
+
+		auto doubleParam(std::string_view param_name)->double;
+		auto floatParam(std::string_view param_name)->float;
+		auto int32Param(std::string_view param_name)->std::int32_t;
+		auto int64Param(std::string_view param_name)->std::int64_t;
+		auto uint32Param(std::string_view param_name)->std::uint32_t;
+		auto uint64Param(std::string_view param_name)->std::uint64_t;
+		auto matrixParam(std::string_view param_name)->aris::core::Matrix;
+		auto matrixParam(std::string_view param_name, int m, int n)->aris::core::Matrix;
 
 		auto param()->std::any&;
 		auto ret()->std::any&;
@@ -136,7 +151,8 @@ namespace aris::plan
 	public:
 		auto planPool()->aris::core::ObjectPool<Plan> &;
 		auto planPool()const->const aris::core::ObjectPool<Plan> & { return const_cast<std::decay_t<decltype(*this)> *>(this)->planPool(); }
-		auto planParser()->aris::core::CommandParser;
+		auto planParser()->aris::core::CommandParser &;
+		auto init()->void;
 
 		virtual ~PlanRoot();
 		explicit PlanRoot(const std::string &name = "plan_root");
@@ -194,7 +210,7 @@ namespace aris::plan
 		auto virtual executeRT()->int override;
 
 		virtual ~Disable();
-		explicit Disable(const std::string &name = "enable_plan");
+		explicit Disable(const std::string &name = "disable_plan");
 		ARIS_REGISTER_TYPE(Disable);
 		ARIS_DECLARE_BIG_FOUR(Disable);
 
@@ -258,6 +274,19 @@ namespace aris::plan
 	private:
 		struct Imp;
 		aris::core::ImpPtr<Imp> imp_;
+	};
+	/// \brief 清理错误
+	///
+	/// 
+	class Clear : public Plan
+	{
+	public:
+		auto virtual prepairNrt()->void override;
+
+		virtual ~Clear() = default;
+		explicit Clear(const std::string &name = "clear_plan");
+		ARIS_REGISTER_TYPE(Clear);
+		ARIS_DEFINE_BIG_FOUR(Clear);
 	};
 	/// \brief 复位，机器人从轴空间按照指定速度运行到指定位置处
 	///

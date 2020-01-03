@@ -7,6 +7,7 @@
 #include <regex>
 #include <list>
 #include <cmath>
+#include <any>
 
 #include "aris/core/expression_calculator.hpp"
 
@@ -350,71 +351,173 @@ namespace aris::core
 		return m1;
 	}
 
-	std::string SeperateString(const std::string &s)
+	struct Calculator::Imp
 	{
-		static const std::string seperateStr("()[]{},;");
-		static const std::string operatorStr("+-*/\\^|<>=");
-
-		std::string ret;
-		ret.reserve(2 * s.size());
-
-		for (int i = 0; i < s.size(); ++i)
+		struct Value
 		{
-			auto &key = s[i];
+			std::string type_;
+			std::any value_;
 
-			// 判断是否为科学计数法的数字 //
-			if ((i > 1) && (i < s.size() - 1))
+			auto val()->std::any& { return std::any_cast<void*>(&value_) ? *reinterpret_cast<std::any*>(std::any_cast<void*>(value_)) : value_; }
+		};
+		struct Typename { };
+		struct Variable
+		{
+			std::string type_, name_;
+			std::any value_;
+		};
+		struct Operator
+		{
+			std::string name;
+
+			Size priority_ul{ 0 };    //unary left
+			Size priority_ur{ 0 };    //unary right
+			Size priority_b{ 0 };     //binary
+
+			std::map<std::string, std::map<std::string, std::pair<std::string, BinaryOperatorFunction>, std::less<>>, std::less<>> b_funs_;
+			std::map<std::string, std::pair<std::string, UnaryOperatorFunction>, std::less<>> ul_funs_;
+			std::map<std::string, std::pair<std::string, UnaryOperatorFunction>, std::less<>> ur_funs_;
+		};
+		struct Function
+		{
+			std::string name;
+			std::vector<std::tuple<std::vector<std::string>, std::string, Calculator::BuiltInFunction>> funs_;
+		};
+		class Token
+		{
+		public:
+			enum Type
 			{
-				if ((key == '+') || (key == '-'))
+				NO,               // invalid
+				COMMA,            // ,
+				SEMICOLON,        // ;
+				PARENTHESIS_L,    // (
+				PARENTHESIS_R,    // )
+				BRACKET_L,        // [
+				BRACKET_R,        // ]
+				BRACE_L,          // {
+				BRACE_R,          // }
+				OPERATOR,         // operator
+				NUMBER,           // number
+				STRING,           // string
+				VARIABLE,         // variable
+				FUNCTION          // function
+			};
+
+			Type type;
+			std::string_view word;
+
+			
+
+			double num;
+			const Typename *tpn_;
+			const Variable *var;
+			const Function *fun;
+			const Operator *opr;
+		};
+
+		using TokenVec = std::vector<Token>;
+		using Iterator = TokenVec::iterator;
+		static auto getWord(std::string_view &input)->std::string_view
+		{
+			static const std::string seperateStr("()[]{},;");
+			static const std::string operatorStr("*+-/\\^|<>=");
+			static const std::string spaceStr(" \t\n\r\f\v");
+			static const std::string numStr("0123456789.");
+			static const std::string varStr("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_0123456789");
+
+			// triml and check if empty //
+			auto next_pos = input.find_first_not_of(spaceStr);
+			input = next_pos == std::string::npos ? std::string_view() : std::string_view(input.data() + next_pos, input.size() - next_pos);
+			if (next_pos == std::string_view::npos)return std::string_view();
+
+			// get number //
+			if (input[0] <= '9' && input[0] >= '0')
+			{
+				bool has_scientific = false;
+				int i;
+				for (i = 1; i < input.size(); ++i)
 				{
-					if (((*(&key - 1) == 'e') || (*(&key - 1) == 'E'))
-						&& (*(&key - 2) <= '9')
-						&& (*(&key - 2) >= '0')
-						&& (*(&key + 1) <= '9')
-						&& (*(&key + 1) >= '0'))
+					// 可能是科学计数法 //
+					if (i < input.size() - 1
+						&& (input[i] == 'e' || input[i] == 'E')
+						&& ((input[i + 1] <= '9' && input[i + 1] >= '0') || input[i + 1] == '+' || input[i + 1] == '-'))
 					{
-						ret += key;
-						ret += s[i + 1];
 						++i;
 						continue;
 					}
-				}
-			}
 
-			// 判断是否为分隔符 //
-			if (seperateStr.find(key) != seperateStr.npos)
-			{
-				ret = ret + " " + key + " ";
+					if (numStr.find(input[i]) == std::string_view::npos) break;
+				}
+
+				auto ret = input.substr(0, i);
+				input = i == input.size() ? std::string_view() : input.substr(i);
+				return ret;
 			}
-			// 判断是否为符号，或者变量数字
-			else if ((i > 0) && (s[i-1] != ' ') && ((operatorStr.find(key) == operatorStr.npos) != (operatorStr.find(s[i - 1]) == operatorStr.npos)))
+			// get seperator //
+			else if (seperateStr.find(input[0]) != seperateStr.npos)
 			{
-				ret = ret + " " + key;
+				auto ret = input.substr(0, 1);
+				input = 1 == input.size() ? std::string_view() : input.substr(1);
+				return ret;
 			}
+			// get operator //
+			else if (operatorStr.find(input[0]) != operatorStr.npos)
+			{
+				int i;
+				for (i = 1; i < input.size() && operatorStr.find(input[i]) != std::string_view::npos; ++i);
+
+				auto ret = input.substr(0, i);
+				input = i == input.size() ? std::string_view() : input.substr(i);
+				return ret;
+			}
+			// get string //
+			else if (input[0] == '\"')
+			{
+				int i;
+				for (i = 1; i < input.size() && !(input[i] == '\"' && input[i - 1] != '\\'); ++i);
+
+				auto ret = input.substr(0, i + 1);
+				input = i + 1 == input.size() ? std::string_view() : input.substr(i + 1);
+				return ret;
+			}
+			// get word //
 			else
 			{
-				ret += key;
+				int i;
+				for (i = 1; i < input.size() && varStr.find(input[i]) != std::string_view::npos; ++i);
+
+				auto ret = input.substr(0, i);
+				input = i == input.size() ? std::string_view() : input.substr(i);
+				return ret;
 			}
 		}
+		auto Expression2Tokens(std::string_view expression)const->TokenVec;
+		auto CaculateTokens(Iterator begin_token, Iterator max_end_token) const->Value;
 
-		//std::cout << ret << std::endl;
+		auto CaculateValueInParentheses(Iterator &begin_token, Iterator max_end_token) const->Value;
+		auto CaculateValueInBraces(Iterator &begin_token, Iterator max_end_token) const->Value;
+		auto CaculateValueInTypename(Iterator &begin_token, Iterator max_end_token) const->Value;
+		auto CaculateValueInFunction(Iterator &begin_token, Iterator max_end_token) const->Value;
+		auto CaculateValueInOperator(Iterator &begin_token, Iterator max_end_token) const->Value;
 
+		auto FindNextOutsideToken(Iterator left_par, Iterator end_token, Token::Type type) const->Iterator;
+		auto FindNextEqualLessPrecedenceBinaryOpr(Iterator begin_token, Iterator end_token, Size precedence)const->Iterator;
+		auto GetValues(Iterator begin_token, Iterator end_token)const->std::vector<std::vector<Value> >;
 
-		return ret;
-	}
-
-	auto Calculator::Expression2Tokens(const std::string &expression)const -> Calculator::TokenVec
+		std::map<std::string, Typename, std::less<>> typename_map_;
+		std::map<std::string, Operator, std::less<>> operator_map_;
+		std::map<std::string, Function, std::less<>> function_map_;
+		std::map<std::string, Variable, std::less<>> variable_map_;
+	};
+	auto Calculator::Imp::Expression2Tokens(std::string_view expression)const -> TokenVec
 	{
-		std::stringstream stream(SeperateString(expression));
-
 		TokenVec tokens;
 		Token token;
 
-		while (stream >> token.word)
+		for (token.word = getWord(expression); !token.word.empty(); token.word = getWord(expression))
 		{
-			token.type = Token::NO;
-
-			switch (*token.word.c_str())
+			switch (*token.word.data())
 			{
 			case ',':token.type = Token::COMMA; break;
 			case ';':token.type = Token::SEMICOLON; break;
@@ -424,9 +527,17 @@ namespace aris::core
 			case ']':token.type = Token::BRACKET_R; break;
 			case '{':token.type = Token::BRACE_L; break;
 			case '}':token.type = Token::BRACE_R; break;
+			
 			default:
+				// 字符串
+				if (token.word.data()[0] == '\"')
+				{
+					if (token.word.back() != '\"')THROW_FILE_LINE("invalid string:" + std::string(token.word));
+					token.type = Token::STRING;
+					break;
+				}
 				// 数字
-				if (std::stringstream(token.word) >> token.num)
+				if (std::stringstream(std::string(token.word)) >> token.num)
 				{
 					token.type = Token::NUMBER;
 					break;
@@ -448,53 +559,53 @@ namespace aris::core
 				// 函数
 				if (function_map_.find(token.word) != function_map_.end())
 				{
-					token.type = Token::Function;
+					token.type = Token::FUNCTION;
 					token.fun = &function_map_.find(token.word)->second;
 					break;
 				}
 
+				THROW_FILE_LINE("unrecognized symbol \"" + std::string(token.word) + "\"");
 			}
-			if (token.type == Token::NO) THROW_FILE_LINE("unrecognized symbol \"" + token.word + "\"");
 			tokens.push_back(token);
-			continue;
 		}
 
 		return tokens;
 	}
-	auto Calculator::CaculateTokens(TokenVec::iterator beginToken, TokenVec::iterator endToken) const ->Matrix
+	auto Calculator::Imp::CaculateTokens(Iterator b_tok, Iterator e_tok) const ->Value
 	{
-		if (beginToken >= endToken)THROW_FILE_LINE("invalid expression");
+		if (b_tok >= e_tok)THROW_FILE_LINE("invalid expression");
 
-		auto i = beginToken;
-		Matrix value;
-		bool isBegin = true;
-		while (i < endToken)
+		Value value;
+		for (auto i = b_tok; i < e_tok; )
 		{
-			// 如果没有当前值,证明刚刚开始计算 //
-			if (isBegin)
+			// 是否刚开始 //
+			if (i == b_tok)
 			{
-				isBegin = false;
 				switch (i->type)
 				{
 				case Token::PARENTHESIS_L:
-					value = CaculateValueInParentheses(i, endToken);
+					value = CaculateValueInParentheses(i, e_tok);
 					break;
 				case Token::BRACE_L:
-					value = CaculateValueInBraces(i, endToken);
+					value = CaculateValueInBraces(i, e_tok);
 					break;
 				case Token::NUMBER:
-					value = i->num;
+					value = Value{ "Number", i->num };
+					i++;
+					break;
+				case Token::STRING:
+					value = Value{ "String", std::string(i->word.substr(1, i->word.size() - 2)) };
 					i++;
 					break;
 				case Token::OPERATOR:
-					value = CaculateValueInOperator(i, endToken);
+					value = CaculateValueInOperator(i, e_tok);
 					break;
 				case Token::VARIABLE:
-					value = *i->var;
+					value = Value{ i->var->type_, (void*)&i->var->value_ };
 					i++;
 					break;
-				case Token::Function:
-					value = CaculateValueInFunction(i, endToken);
+				case Token::FUNCTION:
+					value = CaculateValueInFunction(i, e_tok);
 					break;
 				default:
 					THROW_FILE_LINE("expression not valid");
@@ -506,13 +617,16 @@ namespace aris::core
 				{
 					if (i->opr->priority_ur)
 					{
-						value = i->opr->fun_ur(value);
+						auto func = i->opr->ur_funs_.at(value.type_);
+						value = Value{ func.first, func.second(value.val()) };
 						i++;
 					}
 					else if (i->opr->priority_b > 0)
 					{
-						auto e = FindNextEqualLessPrecedenceBinaryOpr(i + 1, endToken, i->opr->priority_b);
-						value = i->opr->fun_b(value, CaculateTokens(i + 1, e));
+						auto e = FindNextEqualLessPrecedenceBinaryOpr(i + 1, e_tok, i->opr->priority_b);
+						auto right_value = CaculateTokens(i + 1, e);
+						auto func = i->opr->b_funs_.at(value.type_).at(right_value.type_);
+						value = Value{ func.first, func.second(value.val(), right_value.val()) };
 						i = e;
 					}
 					else
@@ -529,230 +643,796 @@ namespace aris::core
 
 		return value;
 	}
-
-	auto Calculator::CaculateValueInParentheses(TokenVec::iterator &i, TokenVec::iterator maxEndToken)const->Matrix
+	auto Calculator::Imp::CaculateValueInParentheses(Iterator &i, Iterator max_end_token)const->Value
 	{
-		auto beginPar = i + 1;
-		auto endPar = FindNextOutsideToken(i + 1, maxEndToken, Token::PARENTHESIS_R);
-		i = endPar + 1;
+		auto b_par = i + 1;
+		auto e_par = FindNextOutsideToken(i + 1, max_end_token, Token::PARENTHESIS_R);
+		i = e_par + 1;
 
-		return CaculateTokens(beginPar, endPar);
+		return CaculateTokens(b_par, e_par);
 	}
-	auto Calculator::CaculateValueInBraces(TokenVec::iterator &i, TokenVec::iterator maxEndToken)const->Matrix
+	auto Calculator::Imp::CaculateValueInBraces(Iterator &i, Iterator max_end_token)const->Value
 	{
-		auto beginBce = i + 1;
-		auto endBce = FindNextOutsideToken(i + 1, maxEndToken, Token::BRACE_R);
-		i = endBce + 1;
+		auto b_bra = i + 1;
+		auto e_bra = FindNextOutsideToken(i + 1, max_end_token, Token::BRACE_R);
+		i = e_bra + 1;
 
-		return combineMatrices(GetMatrices(beginBce, endBce));
+		auto values = GetValues(b_bra, e_bra);
+		std::vector<std::vector<Matrix>> mtx;
+		mtx.reserve(values.size());
+
+		for (auto &r_vec : values)
+		{
+			mtx.push_back(std::vector<Matrix>(r_vec.size()));
+			for (auto &value : r_vec)
+			{
+				if (value.type_ == "Number")
+				{
+					mtx.back().push_back(Matrix(std::any_cast<double>(value.value_)));
+				}
+				else if (value.type_ == "Matrix")
+				{
+					mtx.back().push_back(std::any_cast<Matrix&>(value.value_));
+				}
+				else
+				{
+					THROW_FILE_LINE("invalid type when build Matrix");
+				}
+			}
+		}
+		auto m = combineMatrices(mtx);
+		return Value{ std::string("Matrix"), m };
 	}
-	auto Calculator::CaculateValueInFunction(TokenVec::iterator &i, TokenVec::iterator maxEndToken)const->Matrix
+	auto Calculator::Imp::CaculateValueInTypename(Iterator &i, Iterator max_end_token)const->Value
 	{
-		auto beginPar = i + 1;
-		if (i + 1 >= maxEndToken) THROW_FILE_LINE("invalid expression");
-		if (beginPar->type != Token::PARENTHESIS_L)THROW_FILE_LINE("function must be followed by \"(\"");
+		auto b_par = i + 1;
+		if (i + 1 >= max_end_token) THROW_FILE_LINE("invalid expression");
+		if (b_par->type != Token::PARENTHESIS_L)THROW_FILE_LINE("function must be followed by \"(\"");
 
-		auto endPar = FindNextOutsideToken(beginPar + 1, maxEndToken, Token::PARENTHESIS_R);
-		auto matrices = GetMatrices(beginPar + 1, endPar);
+		auto e_par = FindNextOutsideToken(b_par + 1, max_end_token, Token::PARENTHESIS_R);
 
-		if (matrices.size() != 1)THROW_FILE_LINE("function \"" + i->word + "\" + do not has invalid param type");
+		// get values, but values dimensions must be 1 x n //
+		auto value_mat = GetValues(b_par + 1, e_par);
+		if (value_mat.size() != 1)THROW_FILE_LINE("function \"" + std::string(i->word) + "\" + do not has invalid param type");
 
-		auto params = matrices.front();
-		auto f = i->fun->funs.find(params.size());
-		if (f == i->fun->funs.end())THROW_FILE_LINE("function \"" + i->word + "\" + do not has invalid param num");
+		// transfer values to param types and param values //
+		auto params = value_mat.front();
+		std::vector<std::string> p_types(params.size());
+		std::vector<std::any> p_values(params.size());
+		for (int i = 0; i < params.size(); ++i)
+		{
+			p_types[i] = params[i].type_;
+			p_values[i] = params[i].val();
+		}
 
-		i = endPar + 1;
-		return f->second(params);
+		// search functions //
+		
 	}
-	auto Calculator::CaculateValueInOperator(TokenVec::iterator &i, TokenVec::iterator maxEndToken)const->Matrix
+	auto Calculator::Imp::CaculateValueInFunction(Iterator &i, Iterator max_end_token)const->Value
+	{
+		auto b_par = i + 1;
+		if (i + 1 >= max_end_token) THROW_FILE_LINE("invalid expression");
+		if (b_par->type != Token::PARENTHESIS_L)THROW_FILE_LINE("function must be followed by \"(\"");
+
+		auto e_par = FindNextOutsideToken(b_par + 1, max_end_token, Token::PARENTHESIS_R);
+
+		// get values, but values dimensions must be 1 x n //
+		auto value_mat = GetValues(b_par + 1, e_par);
+		if (value_mat.size() != 1)THROW_FILE_LINE("function \"" + std::string(i->word) + "\" + do not has invalid param type");
+
+		// transfer values to param types and param values //
+		auto params = value_mat.front();
+		std::vector<std::string> p_types(params.size());
+		std::vector<std::any> p_values(params.size());
+		for (int i = 0; i < params.size(); ++i)
+		{
+			p_types[i] = params[i].type_;
+			p_values[i] = params[i].val();
+		}
+
+		// search functions //
+		auto &funs = function_map_.find(std::string(i->word))->second.funs_;
+		if (auto f = std::find_if(funs.begin(), funs.end(), [&](const auto &v)->bool {return p_types.size() == std::get<0>(v).size() && std::equal(p_types.begin(), p_types.end(), std::get<0>(v).begin()); }); f == funs.end())
+		{
+			THROW_FILE_LINE("function \"" + std::string(i->word) + "\" not found");
+		}
+		else
+		{
+			i = e_par + 1;
+			return Value{ std::get<1>(*f), std::get<2>(*f)(p_values) };
+		}
+	}
+	auto Calculator::Imp::CaculateValueInOperator(Iterator &i, Iterator max_end_token)const->Value
 	{
 		auto opr = i;
-		i = FindNextEqualLessPrecedenceBinaryOpr(opr + 1, maxEndToken, opr->opr->priority_ul);
-		return opr->opr->fun_ul(CaculateTokens(opr + 1, i));
+		i = FindNextEqualLessPrecedenceBinaryOpr(opr + 1, max_end_token, opr->opr->priority_ul);
+		auto value = CaculateTokens(opr + 1, i);
+		auto func = opr->opr->ul_funs_.at(value.type_);
+		return Value{func.first, func.second(value.val())};
 	}
-
-	auto Calculator::FindNextOutsideToken(TokenVec::iterator beginToken, TokenVec::iterator endToken, Token::Type type)const->Calculator::TokenVec::iterator
+	auto Calculator::Imp::FindNextOutsideToken(Iterator begin_token, Iterator end_token, Token::Type type)const->Iterator
 	{
-		Size parNum = 0, braNum = 0, bceNum = 0;
-		auto nextPlace = beginToken;
+		Size par_num = 0, bra_num = 0, bce_num = 0;
+		auto next_token = begin_token;
 
-		while (nextPlace < endToken)
+		for (;next_token < end_token; ++next_token)
 		{
-			if ((parNum == 0) && (braNum == 0) && (bceNum == 0) && (nextPlace->type == type))return nextPlace;
-			switch (nextPlace->type)
+			if ((par_num == 0) && (bra_num == 0) && (bce_num == 0) && (next_token->type == type))return next_token;
+			switch (next_token->type)
 			{
-			case Token::PARENTHESIS_L:parNum++; break;
-			case Token::PARENTHESIS_R:parNum--; break;
-			case Token::BRACKET_L:braNum++; break;
-			case Token::BRACKET_R:braNum--; break;
-			case Token::BRACE_L:bceNum++; break;
-			case Token::BRACE_R:bceNum--; break;
+			case Token::PARENTHESIS_L:par_num++; break;
+			case Token::PARENTHESIS_R:par_num--; break;
+			case Token::BRACKET_L:bra_num++; break;
+			case Token::BRACKET_R:bra_num--; break;
+			case Token::BRACE_L:bce_num++; break;
+			case Token::BRACE_R:bce_num--; break;
 			default:break;
 			}
-
-			++nextPlace;
 		}
 
-		return nextPlace;
+		return end_token;
 	}
-	auto Calculator::FindNextEqualLessPrecedenceBinaryOpr(TokenVec::iterator beginToken, TokenVec::iterator endToken, Size precedence)const->Calculator::TokenVec::iterator
+	auto Calculator::Imp::FindNextEqualLessPrecedenceBinaryOpr(Iterator begin_token, Iterator end_token, Size precedence)const->Iterator
 	{
-		auto nextOpr = beginToken;
-
-		while (nextOpr < endToken)
+		auto next_opr = begin_token;
+		for (; next_opr < end_token; ++next_opr)
 		{
-			nextOpr = FindNextOutsideToken(nextOpr, endToken, Token::OPERATOR);
-
-			if ((nextOpr == endToken) || (nextOpr->opr->priority_b <= precedence))
-			{
-				break;
-			}
-			else
-			{
-				++nextOpr;
-			}
+			next_opr = FindNextOutsideToken(next_opr, end_token, Token::OPERATOR);
+			if ((next_opr == end_token) || (next_opr->opr->priority_b <= precedence))break;
 		}
 
-		return nextOpr;
+		return next_opr;
 	}
-	auto Calculator::GetMatrices(TokenVec::iterator beginToken, TokenVec::iterator endToken)const->std::vector<std::vector<Matrix> >
+	auto Calculator::Imp::GetValues(Iterator b_tok, Iterator e_tok)const->std::vector<std::vector<Value> >
 	{
-		std::vector<std::vector<Matrix> > ret;
+		std::vector<std::vector<Value> > ret;
 
-		auto rowBegin = beginToken;
-		while (rowBegin < endToken)
+		auto b_row = b_tok;
+		while (b_row < e_tok)
 		{
-			auto rowEnd = FindNextOutsideToken(rowBegin, endToken, Token::SEMICOLON);
-			auto colBegin = rowBegin;
+			auto e_row = FindNextOutsideToken(b_row, e_tok, Token::SEMICOLON);
+			auto b_col = b_row;
 
-			ret.push_back(std::vector<Matrix>());
+			ret.push_back(std::vector<Value>());
 
-			while (colBegin < rowEnd)
+			while (b_col < e_row)
 			{
-				auto colEnd = FindNextOutsideToken(colBegin, rowEnd, Token::COMMA);
-
-				ret.back().push_back(CaculateTokens(colBegin, colEnd));
-
-				if (colEnd == endToken)
-					colBegin = colEnd;
-				else
-					colBegin = colEnd + 1;
+				auto e_col = FindNextOutsideToken(b_col, e_row, Token::COMMA);
+				ret.back().push_back(CaculateTokens(b_col, e_col));
+				b_col = e_col == e_tok ? e_col : e_col + 1;
 			}
 
-
-			if (rowEnd == endToken)
-				rowBegin = rowEnd;
-			else
-				rowBegin = rowEnd + 1;
+			b_row = e_row == e_tok ? e_row : e_row + 1;
 		}
-
 
 		return ret;
 	}
-
-	auto Calculator::calculateExpression(const std::string &expression) const->Matrix
+	auto Calculator::calculateExpression(std::string_view expression) const->std::pair<std::string, std::any>
 	{
-		auto tokens = Expression2Tokens(expression);
-		return CaculateTokens(tokens.begin(), tokens.end());
+		auto tokens = imp_->Expression2Tokens(expression);
+		auto ret_val = imp_->CaculateTokens(tokens.begin(), tokens.end());
+		return std::make_pair(std::move(ret_val.type_), std::move(ret_val.val()));
 	}
-	auto Calculator::evaluateExpression(const std::string &expression)const->std::string
+	auto Calculator::addTypename(std::string_view tpn)->void
 	{
-		auto ret = expression;
-
-		for (auto &var : string_map_)
+		if (imp_->typename_map_.find(tpn) != imp_->typename_map_.end() ||
+			imp_->variable_map_.find(tpn) != imp_->variable_map_.end() ||
+			imp_->function_map_.find(tpn) != imp_->function_map_.end())
 		{
-			std::string exp{ "\\$\\{" + var.first + "\\}" };
-
-			std::regex var_rex{ exp };
-			ret = std::regex_replace(ret, var_rex, var.second);
+			THROW_FILE_LINE("\"" + std::string(tpn) + "already exists, can't add this type");
 		}
 
+		imp_->typename_map_.insert(make_pair(tpn, Imp::Typename()));
 
-		return ret;
+		auto &funs = imp_->function_map_[std::string(tpn)].funs_;
+		auto p_types = std::vector<std::string>{ std::string(tpn) };
+		auto ret_type = std::string(tpn);
+		funs.push_back(std::make_tuple(p_types, std::string(tpn), [](std::vector<std::any>& v)->std::any {return v[0]; }));
 	}
-	auto Calculator::addVariable(const std::string &name, const Matrix &value)->void
+	auto Calculator::addVariable(std::string_view var, std::string_view type, const std::any &value)->void
 	{
-		if (function_map_.find(name) != function_map_.end())
+		if (imp_->typename_map_.find(var) != imp_->typename_map_.end() ||
+			imp_->variable_map_.find(var) != imp_->variable_map_.end() ||
+			imp_->function_map_.find(var) != imp_->function_map_.end())
 		{
-			THROW_FILE_LINE("function \"" + name + "already exists, can't add variable");
+			THROW_FILE_LINE("\"" + std::string(var) + "already exists, can't add this variable");
 		}
 
-		if (variable_map_.find(name) != variable_map_.end())
-		{
-			THROW_FILE_LINE("variable \"" + name + "already exists, can't add variable");
-		}
-		variable_map_.insert(make_pair(name, value));
+		imp_->variable_map_.insert(make_pair(var, Imp::Variable{std::string(type), std::string(var), value}));
 	}
-	auto Calculator::addVariable(const std::string &name, const std::string &value)->void
+	auto Calculator::addFunction(std::string_view fun, const std::vector<std::string> &params, std::string_view ret_type, BuiltInFunction f)->void
 	{
-		if (string_map_.find(name) != string_map_.end())
+		if (imp_->variable_map_.find(fun) != imp_->variable_map_.end())
 		{
-			THROW_FILE_LINE("variable \"" + name + "already exists, can't add string variable");
+			THROW_FILE_LINE("\"" + std::string(fun) + "already exists, can't add this function");
 		}
-		string_map_.insert(make_pair(name, value));
-	}
-	auto Calculator::addFunction(const std::string &name, std::function<Matrix(std::vector<Matrix>)> f, Size n)->void
-	{
-		if (variable_map_.find(name) != variable_map_.end())
-		{
-			THROW_FILE_LINE("variable \"" + name + "already exists, can't add function");
-		}
-
-		function_map_[name].AddOverloadFun(n, f);
-	}
-
-	Calculator::Calculator()
-	{
-		operator_map_["+"].SetBinaryOpr(1, [](Matrix m1, Matrix m2) {return m1 + m2; });
-		operator_map_["+"].SetUnaryLeftOpr(1, [](Matrix m) {return m; });
-		operator_map_["-"].SetBinaryOpr(1, [](Matrix m1, Matrix m2) {return m1 - m2; });
-		operator_map_["-"].SetUnaryLeftOpr(1, [](Matrix m) {return -m; });
-		operator_map_["*"].SetBinaryOpr(2, [](Matrix m1, Matrix m2) {return m1 * m2; });
-		operator_map_["/"].SetBinaryOpr(2, [](Matrix m1, Matrix m2) {return m1 / m2; });
 		
-#define MATRIX_OPR(OPR) \
-		Matrix ret;\
-		if (m1.size() == 1)\
-		{					\
-			ret = Matrix(m2);\
-			for (auto &d : ret)d = m1(0, 0) OPR d;\
-		}\
-		else if (m2.size() == 1)\
+		auto &funs = imp_->function_map_[std::string(fun)].funs_;
+		if (std::find_if(funs.begin(), funs.end(), [&](const auto &val)->bool {	return std::equal(params.begin(), params.end(), std::get<0>(val).begin()); }) != funs.end())
+			THROW_FILE_LINE("function \"" + std::string(fun) + "already exists, can't add function");
+
+		funs.push_back(std::make_tuple(params, std::string(ret_type), f));
+	}
+	auto Calculator::addOperator(std::string_view opr, int ul_priority, int ur_priority, int b_priority)->void
+	{
+		if (imp_->operator_map_.find(opr) != imp_->operator_map_.end())THROW_FILE_LINE("Already has operator:" + std::string(opr));
+
+		imp_->operator_map_[std::string(opr)].priority_ul = ul_priority;
+		imp_->operator_map_[std::string(opr)].priority_ur = ur_priority;
+		imp_->operator_map_[std::string(opr)].priority_b = b_priority;
+	}
+	auto Calculator::addUnaryLeftOperatorFunction(std::string_view opr, std::string_view p_type, std::string_view ret_type, UnaryOperatorFunction f)->void
+	{
+		if (auto found_opr = imp_->operator_map_.find(opr);found_opr == imp_->operator_map_.end())THROW_FILE_LINE("failed add operator func:" + std::string(opr));
+		else if(auto found_type = imp_->typename_map_.find(p_type); found_type == imp_->typename_map_.end())THROW_FILE_LINE("failed add operator func:" + std::string(p_type));
+		else if (auto found_func = found_opr->second.ul_funs_.find(p_type); found_func != found_opr->second.ul_funs_.end())THROW_FILE_LINE("failed add operator func:" + std::string(opr));
+		else
+		{
+			found_opr->second.ul_funs_.insert(std::make_pair(std::string(p_type), std::make_pair(std::string(ret_type), f)));
+		}
+	}
+	auto Calculator::addUnaryRightOperatorFunction(std::string_view opr, std::string_view p_type, std::string_view ret_type, UnaryOperatorFunction f)->void
+	{
+		if (auto found_opr = imp_->operator_map_.find(opr); found_opr == imp_->operator_map_.end())THROW_FILE_LINE("failed add operator func:" + std::string(opr));
+		else if (auto found_type = imp_->typename_map_.find(p_type); found_type == imp_->typename_map_.end())THROW_FILE_LINE("failed add operator func:" + std::string(p_type));
+		else if (auto found_func = found_opr->second.ur_funs_.find(p_type); found_func != found_opr->second.ur_funs_.end())THROW_FILE_LINE("failed add operator func:" + std::string(opr));
+		else
+		{
+			found_opr->second.ur_funs_.insert(std::make_pair(std::string(p_type), std::make_pair(std::string(ret_type), f)));
+		}
+	}
+	auto Calculator::addBinaryOperatorFunction(std::string_view opr, std::string_view p1_type, std::string_view p2_type, std::string_view ret_type, BinaryOperatorFunction f)->void
+	{
+		if (auto found_opr = imp_->operator_map_.find(opr); found_opr == imp_->operator_map_.end())THROW_FILE_LINE("failed add operator func:" + std::string(opr));
+		else if (auto found_type1 = imp_->typename_map_.find(p1_type); found_type1 == imp_->typename_map_.end())THROW_FILE_LINE("failed add operator func:" + std::string(p1_type));
+		else if (auto found_type2 = imp_->typename_map_.find(p2_type); found_type2 == imp_->typename_map_.end())THROW_FILE_LINE("failed add operator func:" + std::string(p2_type));
+		else if (auto found = found_opr->second.b_funs_.find(p1_type); found != found_opr->second.b_funs_.end() && found->second.find(p2_type) != found->second.end())
+			THROW_FILE_LINE("failed add operator func:" + std::string(opr));
+		else
+		{
+			if (found == found_opr->second.b_funs_.end())
+				found_opr->second.b_funs_.insert(std::make_pair(std::string(p1_type), std::map<std::string, std::pair<std::string, BinaryOperatorFunction>, std::less<>>()));
+
+			found_opr->second.b_funs_[std::string(p1_type)][std::string(p2_type)] = std::make_pair(std::string(ret_type), f);
+		}
+	}
+	auto Calculator::clearVariables()->void { imp_->variable_map_.clear(); }
+	Calculator::~Calculator() = default;
+	Calculator::Calculator(const std::string &name)
+	{
+		addTypename("String");
+		addTypename("Number");
+		addTypename("Matrix");
+
+		addOperator("+", 10, 0, 10);
+		addUnaryLeftOperatorFunction("+", "Number", "Number", [](std::any& p1)->std::any {return std::any_cast<double>(p1); });
+		addBinaryOperatorFunction("+", "Number", "Number", "Number", [](std::any& p1, std::any&p2)->std::any
+		{
+			return std::any_cast<double>(p1) + std::any_cast<double>(p2);
+		});
+		addBinaryOperatorFunction("+", "Number", "Matrix", "Matrix", [](std::any& p1, std::any&p2)->std::any
+		{
+			return std::any_cast<double>(p1) + std::any_cast<aris::core::Matrix&>(p2);
+		});
+		addBinaryOperatorFunction("+", "Matrix", "Number", "Matrix", [](std::any& p1, std::any&p2)->std::any
+		{
+			return std::any_cast<aris::core::Matrix&>(p1) + std::any_cast<double>(p2);
+		});
+		addBinaryOperatorFunction("+", "Matrix", "Matrix", "Matrix", [](std::any& p1, std::any&p2)->std::any
+		{
+			return std::any_cast<aris::core::Matrix&>(p1) + std::any_cast<aris::core::Matrix>(p2);
+		});
+
+		addOperator("-", 10, 0, 10);
+		addUnaryLeftOperatorFunction("-", "Number", "Number", [](std::any& p1)->std::any {return -std::any_cast<double>(p1); });
+		addBinaryOperatorFunction("-", "Number", "Number", "Number", [](std::any& p1, std::any&p2)->std::any
+		{
+			return std::any_cast<double>(p1) - std::any_cast<double>(p2);
+		});
+		addBinaryOperatorFunction("-", "Number", "Matrix", "Matrix", [](std::any& p1, std::any&p2)->std::any
+		{
+			return std::any_cast<double>(p1) - std::any_cast<aris::core::Matrix&>(p2);
+		});
+		addBinaryOperatorFunction("-", "Matrix", "Number", "Matrix", [](std::any& p1, std::any&p2)->std::any
+		{
+			return std::any_cast<aris::core::Matrix&>(p1) - std::any_cast<double>(p2);
+		});
+		addBinaryOperatorFunction("-", "Matrix", "Matrix", "Matrix", [](std::any& p1, std::any&p2)->std::any
+		{
+			return std::any_cast<aris::core::Matrix&>(p1) - std::any_cast<aris::core::Matrix>(p2);
+		});
+
+		addOperator("*", 0, 0, 20);
+		addBinaryOperatorFunction("*", "Number", "Number", "Number", [](std::any& p1, std::any&p2)->std::any
+		{
+			return std::any_cast<double>(p1) * std::any_cast<double>(p2);
+		});
+		addBinaryOperatorFunction("*", "Number", "Matrix", "Matrix", [](std::any& p1, std::any&p2)->std::any
+		{
+			return std::any_cast<double>(p1) * std::any_cast<aris::core::Matrix&>(p2);
+		});
+		addBinaryOperatorFunction("*", "Matrix", "Number", "Matrix", [](std::any& p1, std::any&p2)->std::any
+		{
+			return std::any_cast<aris::core::Matrix&>(p1) * std::any_cast<double>(p2);
+		});
+		addBinaryOperatorFunction("*", "Matrix", "Matrix", "Matrix", [](std::any& p1, std::any&p2)->std::any
+		{
+			return std::any_cast<aris::core::Matrix&>(p1) * std::any_cast<aris::core::Matrix>(p2);
+		});
+
+		addOperator("/", 0, 0, 20);
+		addBinaryOperatorFunction("/", "Number", "Number", "Number", [](std::any& p1, std::any&p2)->std::any
+		{
+			return std::any_cast<double>(p1) / std::any_cast<double>(p2);
+		});
+
+		addOperator("++", 100, 100, 0);
+		addUnaryLeftOperatorFunction("++", "Number", "Number", [](std::any& p1)->std::any {	return std::any_cast<double&>(p1) += 1.0; });
+		addUnaryRightOperatorFunction("++", "Number", "Number", [](std::any& p1)->std::any
+		{
+			auto ret = std::any_cast<double>(p1);
+			std::any_cast<double&>(p1) += 1.0;
+			return ret;
+		});
+
+		addOperator("--", 100, 100, 0);
+		addUnaryLeftOperatorFunction("--", "Number", "Number", [](std::any& p1)->std::any {	return std::any_cast<double&>(p1) -= 1.0; });
+		addUnaryRightOperatorFunction("--", "Number", "Number", [](std::any& p1)->std::any
+		{
+			auto ret = std::any_cast<double>(p1);
+			std::any_cast<double&>(p1) -= 1.0;
+			return ret;
+		});
+
+#define ADD_MATRIX_OPR(OPR) \
+		[](std::any& p1, std::any&p2)->std::any \
 		{\
-			ret = Matrix(m1);\
-			for (auto &d : ret) d = d OPR m2(0, 0);\
-		}\
-		else if ((m1.m() == m2.m()) && (m1.n() == m2.n()))\
+			auto &m1 = std::any_cast<aris::core::Matrix&>(p1);\
+			auto &m2 = std::any_cast<aris::core::Matrix&>(p2);\
+			Matrix ret;\
+			if (m1.size() == 1)\
+			{					\
+				ret = Matrix(m2);\
+				for (auto &d : ret)d = m1(0, 0) OPR d;\
+			}\
+			else if (m2.size() == 1)\
+			{\
+				ret = Matrix(m1);\
+				for (auto &d : ret) d = d OPR m2(0, 0);\
+			}\
+			else if ((m1.m() == m2.m()) && (m1.n() == m2.n()))\
+			{\
+				ret = Matrix(m1);\
+									\
+				for (Size i = 0; i < ret.size(); ++i)\
+				{\
+					ret.data()[i] = m1.data()[i] OPR m2.data()[i];\
+				}\
+			}\
+			else\
+			{\
+				THROW_FILE_LINE("dimensions are not equal");\
+			}\
+			return ret;\
+		}
+
+#define ADD_NUM_MATRIX_OPR(OPR) \
+		[](std::any& p1, std::any&p2)->std::any \
 		{\
-			ret = Matrix(m1);\
-								\
+			auto &m1 = std::any_cast<double&>(p1);\
+			auto &m2 = std::any_cast<aris::core::Matrix&>(p2);\
+			Matrix ret = m2;\
 			for (Size i = 0; i < ret.size(); ++i)\
 			{\
-				ret.data()[i] = m1.data()[i] OPR m2.data()[i];\
+				ret.data()[i] = m1 OPR m2.data()[i];\
 			}\
-		}\
-		else\
+			return ret;\
+		}
+
+#define ADD_MATRIX_NUM_OPR(OPR) \
+		[](std::any& p1, std::any&p2)->std::any \
 		{\
-			THROW_FILE_LINE("dimensions are not equal");\
-		}\
-		return ret;
-		
-		
-		operator_map_["<"].SetBinaryOpr(1, [](Matrix m1, Matrix m2) { MATRIX_OPR(<);});
-		operator_map_["<="].SetBinaryOpr(1, [](Matrix m1, Matrix m2) { MATRIX_OPR(<=); });
-		operator_map_[">"].SetBinaryOpr(1, [](Matrix m1, Matrix m2) { MATRIX_OPR(>); });
-		operator_map_[">="].SetBinaryOpr(1, [](Matrix m1, Matrix m2) { MATRIX_OPR(>=); });
-		operator_map_["=="].SetBinaryOpr(1, [](Matrix m1, Matrix m2) { MATRIX_OPR(== ); });
+			auto &m1 = std::any_cast<aris::core::Matrix&>(p1);\
+			auto &m2 = std::any_cast<double&>(p2);\
+			Matrix ret = m1;\
+			for (Size i = 0; i < ret.size(); ++i)\
+			{\
+				ret.data()[i] = m1.data()[i] OPR m2;\
+			}\
+			return ret;\
+		}
 
-#undef ARIS_SET_TYPE
+#define ADD_NUMBER_OPR(OPR) \
+		[](std::any& p1, std::any&p2)->std::any \
+		{\
+			return double(std::any_cast<double&>(p1) OPR std::any_cast<double&>(p2)); \
+		}
 
-		addFunction("sqrt", [](std::vector<Matrix> v)
+		addOperator("<", 1, 0, 1);
+		addBinaryOperatorFunction("<", "Matrix", "Matrix", "Matrix", ADD_MATRIX_OPR(<));
+		addBinaryOperatorFunction("<", "Number", "Matrix", "Matrix", ADD_NUM_MATRIX_OPR(<));
+		addBinaryOperatorFunction("<", "Matrix", "Number", "Matrix", ADD_MATRIX_NUM_OPR(<));
+		addBinaryOperatorFunction("<", "Number", "Number", "Number", ADD_NUMBER_OPR(<));
+
+		addOperator("<=", 1, 0, 1);
+		addBinaryOperatorFunction("<=", "Matrix", "Matrix", "Matrix", ADD_MATRIX_OPR(<=));
+		addBinaryOperatorFunction("<=", "Number", "Matrix", "Matrix", ADD_NUM_MATRIX_OPR(<=));
+		addBinaryOperatorFunction("<=", "Matrix", "Number", "Matrix", ADD_MATRIX_NUM_OPR(<=));
+		addBinaryOperatorFunction("<=", "Number", "Number", "Number", ADD_NUMBER_OPR(<=));
+
+		addOperator(">", 1, 0, 1);
+		addBinaryOperatorFunction(">", "Matrix", "Matrix", "Matrix", ADD_MATRIX_OPR(> ));
+		addBinaryOperatorFunction(">", "Number", "Matrix", "Matrix", ADD_NUM_MATRIX_OPR(> ));
+		addBinaryOperatorFunction(">", "Matrix", "Number", "Matrix", ADD_MATRIX_NUM_OPR(> ));
+		addBinaryOperatorFunction(">", "Number", "Number", "Number", ADD_NUMBER_OPR(> ));
+
+		addOperator(">=", 1, 0, 1);
+		addBinaryOperatorFunction(">=", "Matrix", "Matrix", "Matrix", ADD_MATRIX_OPR(>= ));
+		addBinaryOperatorFunction(">=", "Number", "Matrix", "Matrix", ADD_NUM_MATRIX_OPR(>= ));
+		addBinaryOperatorFunction(">=", "Matrix", "Number", "Matrix", ADD_MATRIX_NUM_OPR(>= ));
+		addBinaryOperatorFunction(">=", "Number", "Number", "Number", ADD_NUMBER_OPR(>= ));
+
+		addOperator("==", 1, 0, 1);
+		addBinaryOperatorFunction("==", "Matrix", "Matrix", "Matrix", ADD_MATRIX_OPR(== ));
+		addBinaryOperatorFunction("==", "Number", "Matrix", "Matrix", ADD_NUM_MATRIX_OPR(== ));
+		addBinaryOperatorFunction("==", "Matrix", "Number", "Matrix", ADD_MATRIX_NUM_OPR(== ));
+		addBinaryOperatorFunction("==", "Number", "Number", "Number", ADD_NUMBER_OPR(== ));
+
+		addVariable("pi", "Number", double(3.141592653));
+		addFunction("sin", std::vector<std::string>{"Number"}, "Number", [](std::vector<std::any> &params)->std::any 
 		{
-			Matrix ret = v.front();
-
-			for (auto &d : ret)	d = std::sqrt(d);
-
-			return ret;
-		}, 1);
+			return std::sin(std::any_cast<double>(params[0]));
+		});
 	}
+	Calculator::Calculator(const Calculator &) = default;
+	Calculator::Calculator(Calculator &&) = default;
+	Calculator& Calculator::operator=(const Calculator &) = default;
+	Calculator& Calculator::operator=(Calculator &&) = default;
+
+	struct LanguageParser::Imp
+	{
+		struct CmdInfo
+		{
+			std::string cmd;
+			int next_cmd_true_, next_cmd_false_;
+		};
+
+		// 关键词 //
+		static inline const char *MAIN = "main";
+		static inline const char *ENDMAIN = "endmain";
+		static inline const char *FUNCTION = "function";
+		static inline const char *ENDFUNCTION = "endfunction";
+		static inline const char *VAR = "var";
+		static inline const char *IF = "if";
+		static inline const char *ELSE = "else";
+		static inline const char *ELSEIF = "elseif";
+		static inline const char *ENDIF = "endif";
+		static inline const char *WHILE = "while";
+		static inline const char *ENDWHILE = "endwhile";
+
+		using Iterator = std::map<int, CmdInfo>::iterator;
+		auto parseEnvironment(Iterator b, Iterator e)->Iterator
+		{
+			main_id_ = 0;
+
+			for (auto i = b; i != e; ++i)
+			{
+				auto id = i->first;
+				auto &info = i->second;
+				auto cmd_name = info.cmd.substr(0, info.cmd.find_first_of(" \t\n\r\f\v("));
+
+				if (auto l = { ENDMAIN, ENDWHILE, IF, ELSEIF, ELSE, ENDIF, WHILE, ENDWHILE };
+				std::any_of(l.begin(), l.end(), [&cmd_name](const char *c) {return c == cmd_name; }))
+				{
+					auto err = "invalid " + info.cmd + " in line:" + std::to_string(id);
+					THROW_FILE_LINE(err);
+				}
+				else if (cmd_name == VAR)
+				{
+					var_pool_.push_back(info.cmd);
+				}
+				else if (cmd_name == MAIN)
+				{
+					main_id_ = i->first;
+					current_id_ = i->first;
+					if (std::next(i) != e)i->second.next_cmd_true_ = std::next(i)->first;
+					i = parseMain(std::next(i), e);
+				}
+				else if (cmd_name == FUNCTION)
+				{
+					if (info.cmd.find_first_of(" \t\n\r\f\v(") == std::string::npos)	THROW_FILE_LINE("function does not have name in line: " + std::to_string(i->first));
+					auto func = info.cmd.substr(info.cmd.find_first_of(" \t\n\r\f\v("), std::string::npos);
+					func.erase(0, func.find_first_not_of(" \t\n\r\f\v"));
+					auto funcname = func.substr(0, func.find_first_of(" \t\n\r\f\v("));
+					if (functions_.find(funcname) != functions_.end())
+					{
+						THROW_FILE_LINE("function already exist in line " + std::to_string(i->first));
+					}
+					functions_.insert(std::make_pair(funcname, i->first));
+
+					if (std::next(i) != e)i->second.next_cmd_true_ = std::next(i)->first;
+					i = parseFunction(std::next(i), e);
+				}
+				else
+				{
+					auto err = "invalid " + info.cmd + " in line:" + std::to_string(id);
+					THROW_FILE_LINE(err);
+				}
+			}
+
+			if (main_id_ == 0)THROW_FILE_LINE("program must has main");
+
+			return e;
+		}
+		auto parseMain(Iterator b, Iterator e)->Iterator
+		{
+			for (auto i = b; i != e; ++i)
+			{
+				auto id = i->first;
+				auto &info = i->second;
+				auto cmd_name = info.cmd.substr(0, info.cmd.find_first_of(" \t\n\r\f\v("));
+
+				if (cmd_name == ENDMAIN)
+				{
+					auto ret = parseCode(b, i);
+					std::prev(i)->second.next_cmd_true_ = i->first;
+					return ret;
+				}
+			}
+
+			std::string err = "no endfuncion for function in line " + std::to_string(b->first);
+			THROW_FILE_LINE(err);
+
+			return e;
+		}
+		auto parseFunction(Iterator b, Iterator e)->Iterator
+		{
+			for (auto i = b; i != e; ++i)
+			{
+				auto id = i->first;
+				auto &info = i->second;
+				auto cmd_name = info.cmd.substr(0, info.cmd.find_first_of(" \t\n\r\f\v("));
+
+				if (cmd_name == ENDFUNCTION)
+				{
+					auto ret = parseCode(b, i);
+					std::prev(i)->second.next_cmd_true_ = i->first;
+					return ret;
+				}
+			}
+
+			std::string err = "no endfuncion for function in line " + std::to_string(b->first);
+			THROW_FILE_LINE(err);
+
+			return e;
+		}
+		auto parseCode(Iterator b, Iterator e)->Iterator
+		{
+			for (auto i = b; i != e; ++i)
+			{
+				auto id = i->first;
+				auto &info = i->second;
+				auto cmd_name = info.cmd.substr(0, info.cmd.find_first_of(" \t\n\r\f\v("));
+
+				if (auto l = { MAIN, ENDMAIN, FUNCTION, ENDFUNCTION, VAR, ELSEIF, ELSE, ENDIF, ENDWHILE };
+				std::any_of(l.begin(), l.end(), [&cmd_name](const char *c) {return c == cmd_name; }))
+				{
+					auto err = "invalid " + info.cmd + " in line:" + std::to_string(id);
+					THROW_FILE_LINE(err);
+				}
+				else if (cmd_name == IF)
+				{
+					if (std::next(i) != e)i->second.next_cmd_true_ = std::next(i)->first;
+					i = parseIf(i, e);
+				}
+				else if (cmd_name == WHILE)
+				{
+					if (std::next(i) != e)i->second.next_cmd_true_ = std::next(i)->first;
+					i = parseWhile(i, e);
+				}
+				else
+				{
+					info.next_cmd_true_ = std::next(i) == e ? 0 : std::next(i)->first;
+				}
+			}
+
+			return e;
+		}
+		auto parseIf(Iterator b, Iterator e)->Iterator
+		{
+			std::list<Iterator> prev_else_line;
+			Iterator last_if_begin = b;
+
+			int is_end = 1;
+			bool has_else = false;
+			for (auto i = std::next(b); i != e; ++i)
+			{
+				auto id = i->first;
+				auto &info = i->second;
+				auto cmd_name = info.cmd.substr(0, info.cmd.find_first_of(" \t\n\r\f\v("));
+
+				if (cmd_name == IF)
+				{
+					is_end++;
+				}
+				else if (cmd_name == ELSEIF && is_end == 1)
+				{
+					if (has_else)
+					{
+						std::string err = "Find elseif after else in line " + std::to_string(i->first);
+						THROW_FILE_LINE(err);
+					}
+
+					parseCode(std::next(last_if_begin), i);
+					last_if_begin->second.next_cmd_false_ = i->first;
+					last_if_begin = i;
+					i->second.next_cmd_true_ = std::next(i)->first;
+
+					prev_else_line.push_back(std::prev(i));
+				}
+				else if (cmd_name == ELSE && is_end == 1)
+				{
+					if (has_else)
+					{
+						std::string err = "Find second else in line " + std::to_string(i->first);
+						THROW_FILE_LINE(err);
+					}
+					has_else = true;
+
+					parseCode(std::next(last_if_begin), i);
+					last_if_begin->second.next_cmd_false_ = i->first;
+					last_if_begin = i;
+					i->second.next_cmd_true_ = std::next(i)->first;
+
+					prev_else_line.push_back(std::prev(i));
+				}
+				else if (cmd_name == ENDIF)
+				{
+					is_end--;
+
+					if (is_end == 0)
+					{
+						parseCode(std::next(last_if_begin), i);
+						auto prev_cmd_name = std::prev(i)->second.cmd.substr(0, std::prev(i)->second.cmd.find_first_of(" \t\n\r\f\v("));
+						if (prev_cmd_name != "if") std::prev(i)->second.next_cmd_true_ = i->first;
+						i->second.next_cmd_true_ = std::next(i) == e ? 0 : std::next(i)->first;
+						auto last_if_begin_cmd_name = last_if_begin->second.cmd.substr(0, last_if_begin->second.cmd.find_first_of(" \t\n\r\f\v("));
+						if (last_if_begin_cmd_name != "else")last_if_begin->second.next_cmd_false_ = i->first;
+
+						for (auto j : prev_else_line)
+						{
+							j->second.next_cmd_true_ = i->first;
+						}
+
+						return i;
+					}
+				}
+			}
+
+			std::string err = "no endif for if in line " + std::to_string(b->first);
+			THROW_FILE_LINE(err);
+
+			return b;
+		}
+		auto parseWhile(Iterator b, Iterator e)->Iterator
+		{
+			int is_end = 1;
+			for (auto i = std::next(b); i != e; ++i)
+			{
+				auto id = i->first;
+				auto &info = i->second;
+				auto cmd_name = info.cmd.substr(0, info.cmd.find_first_of(" \t\n\r\f\v("));
+
+				if (cmd_name == WHILE)
+				{
+					is_end++;
+				}
+				else if (cmd_name == ENDWHILE)
+				{
+					is_end--;
+
+					if (is_end == 0)
+					{
+						parseCode(std::next(b), i);
+						std::prev(i)->second.next_cmd_true_ = b->first;
+						i->second.next_cmd_true_ = std::next(i) == e ? 0 : std::next(i)->first;
+						b->second.next_cmd_false_ = i->first;
+
+						return i;
+					}
+				}
+			}
+
+			return b;
+		}
+
+		int main_id_{ 0 }, current_id_{ 0 };
+		std::map<int, CmdInfo> cmd_map_;
+		std::map<std::string, int> functions_;
+		std::vector<std::string> var_pool_;
+		std::list<int> function_ret_stack_;
+		std::string program_;
+	};
+	auto LanguageParser::parseLanguage()->void
+	{
+		imp_->parseEnvironment(imp_->cmd_map_.begin(), imp_->cmd_map_.end());
+
+		//for (auto &cmd : imp_->cmd_map_)
+		//{
+		//	std::cout << std::setw(4) << cmd.first << " : " << std::setw(15) << cmd.second.cmd << " | " << std::setw(5) << cmd.second.next_cmd_true_ << " | " << cmd.second.next_cmd_false_ << std::endl;
+		//}
+		//for (auto &cmd : imp_->functions_)
+		//{
+		//	std::cout << cmd.first << std::endl;
+		//}
+	}
+	auto LanguageParser::setProgram(std::string_view program)->void
+	{
+		imp_->cmd_map_.clear();
+		imp_->functions_.clear();
+		imp_->function_ret_stack_.clear();
+		imp_->var_pool_.clear();
+
+		imp_->program_ = program;
+
+		std::stringstream ss(imp_->program_);
+		int id;
+		while (ss >> id)
+		{
+			char c;
+			while (ss >> c, c != ':');
+			std::string cmd;
+			std::getline(ss, cmd);
+			cmd.erase(0, cmd.find_first_not_of(" \t\n\r\f\v"));// trim l
+			cmd.erase(cmd.find_last_not_of(" \t\n\r\f\v") + 1);// trim r
+			if (cmd != "")imp_->cmd_map_[id] = Imp::CmdInfo{ cmd, 0, 0 };
+		}
+	}
+	auto LanguageParser::varPool()->const std::vector<std::string>& { return imp_->var_pool_; }
+	auto LanguageParser::gotoMain()->void { imp_->current_id_ = imp_->main_id_; }
+	auto LanguageParser::gotoLine(int line)->void
+	{
+		if (imp_->cmd_map_.find(line) == imp_->cmd_map_.end())THROW_FILE_LINE("This line does not exist");
+		imp_->current_id_ = line;
+	}
+	auto LanguageParser::forward(bool is_this_cmd_successful)->void
+	{
+		auto cmd_str = currentCmd().substr(0, currentCmd().find_first_of(" \t\n\r\f\v("));
+
+		if (auto found = imp_->functions_.find(cmd_str); found != imp_->functions_.end())
+		{
+			imp_->function_ret_stack_.push_back(imp_->cmd_map_[imp_->current_id_].next_cmd_true_);
+			imp_->current_id_ = found->second;
+		}
+		else if (cmd_str == "endfunction")
+		{
+			imp_->current_id_ = imp_->function_ret_stack_.back();
+			imp_->function_ret_stack_.pop_back();
+		}
+		else
+		{
+			imp_->current_id_ = is_this_cmd_successful ? imp_->cmd_map_[imp_->current_id_].next_cmd_true_ : imp_->cmd_map_[imp_->current_id_].next_cmd_false_;
+		}
+	}
+	auto LanguageParser::currentLine()const->int { return imp_->current_id_; }
+	auto LanguageParser::currentCmd()const->const std::string& { return imp_->cmd_map_.at(imp_->current_id_).cmd; }
+	auto LanguageParser::isCurrentLineKeyWord()const->bool
+	{
+		auto cmd_name = currentCmd().substr(0, currentCmd().find_first_of(" \t\n\r\f\v("));
+		auto l = { Imp::MAIN, Imp::ENDMAIN, Imp::FUNCTION, Imp::ENDFUNCTION	, Imp::VAR, Imp::IF, Imp::ELSE, Imp::ELSEIF, Imp::ENDIF, Imp::WHILE, Imp::ENDWHILE, };
+		return std::any_of(l.begin(), l.end(), [&cmd_name](const char *c) {return c == cmd_name; });
+	}
+	auto LanguageParser::isCurrentLineFunction()const->bool
+	{
+		auto cmd_name = currentCmd().substr(0, currentCmd().find_first_of(" \t\n\r\f\v("));
+		return imp_->functions_.find(cmd_name) != imp_->functions_.end();
+	}
+	auto LanguageParser::isEnd()const->bool
+	{
+		auto found = imp_->cmd_map_.find(imp_->current_id_);
+		return (found == imp_->cmd_map_.end()) || (found->second.cmd == "endmain") ? true : false;
+	}
+	LanguageParser::~LanguageParser() = default;
+	LanguageParser::LanguageParser(const std::string &name) :Object(name), imp_(new Imp) {}
+	ARIS_DEFINE_BIG_FOUR_CPP(LanguageParser);
 }

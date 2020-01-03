@@ -87,13 +87,15 @@ namespace aris::control
 		auto setSync0ShiftNs(std::int32_t sync0_shift_ns)->void;
 		auto scanInfoForCurrentSlave()->void;
 		auto scanPdoForCurrentSlave()->void;
+		auto findPdoEntry(std::uint16_t index, std::uint8_t subindex)const->const PdoEntry* { return const_cast<std::decay_t<decltype(*this)> *>(this)->findPdoEntry(index, subindex); }
+		auto findPdoEntry(std::uint16_t index, std::uint8_t subindex)->PdoEntry*;
 
 		template<typename ValueType>
-		auto readPdo(std::uint16_t index, std::uint8_t subindex, ValueType &value)const->void { readPdo(index, subindex, &value, sizeof(ValueType) * 8); }
-		auto readPdo(std::uint16_t index, std::uint8_t subindex, void *value, aris::Size bit_size)const->void;
+		auto readPdo(std::uint16_t index, std::uint8_t subindex, ValueType &value)const->int { return readPdo(index, subindex, &value, sizeof(ValueType) * 8); }
+		auto readPdo(std::uint16_t index, std::uint8_t subindex, void *value, aris::Size bit_size)const->int;
 		template<typename ValueType>
-		auto writePdo(std::uint16_t index, std::uint8_t subindex, const ValueType &value)->void { writePdo(index, subindex, &value, sizeof(ValueType) * 8); }
-		auto writePdo(std::uint16_t index, std::uint8_t subindex, const void *value, aris::Size bit_size)->void;
+		auto writePdo(std::uint16_t index, std::uint8_t subindex, const ValueType &value)->int { return writePdo(index, subindex, &value, sizeof(ValueType) * 8); }
+		auto writePdo(std::uint16_t index, std::uint8_t subindex, const void *value, aris::Size bit_size)->int;
 		template<typename ValueType>
 		auto readSdo(std::uint16_t index, std::uint8_t subindex, ValueType &value)->void { readSdo(index, subindex, &value, sizeof(ValueType)); }
 		auto readSdo(std::uint16_t index, std::uint8_t subindex, void *value, aris::Size byte_size)->void;
@@ -194,6 +196,9 @@ namespace aris::control
 	class EthercatMotor :public EthercatSlave, public Motor
 	{
 	public:
+		auto isVirtual()->bool;
+		auto setVirtual(bool is_virtual = true)->void;
+
 		auto virtual saveXml(aris::core::XmlElement &xml_ele) const->void override;
 		auto virtual loadXml(const aris::core::XmlElement &xml_ele)->void override;
 
@@ -242,7 +247,8 @@ namespace aris::control
 
 		EthercatMotor(const std::string &name = "ethercat_motion", std::uint16_t phy_id = 0
 			, std::uint32_t vendor_id = 0x00000000, std::uint32_t product_code = 0x00000000, std::uint32_t revision_num = 0x00000000, std::uint32_t dc_assign_activate = 0x00000000
-			, double max_pos = 1.0, double min_pos = -1.0, double max_vel = 1.0, double min_vel = -1.0, double max_acc = 1.0, double min_acc = -1.0, double max_pos_following_error = 1.0, double max_vel_following_error = 1.0, double pos_factor = 1.0, double pos_offset = 0.0, double home_pos = 0.0);
+			, double max_pos = 1.0, double min_pos = -1.0, double max_vel = 1.0, double min_vel = -1.0, double max_acc = 1.0, double min_acc = -1.0
+			, double max_pos_following_error = 1.0, double max_vel_following_error = 1.0, double pos_factor = 1.0, double pos_offset = 0.0, double home_pos = 0.0, bool is_virtual = false);
 		ARIS_REGISTER_TYPE(EthercatMotor);
 		EthercatMotor(const EthercatMotor &other);
 		EthercatMotor(EthercatMotor &&other) = delete;
@@ -250,7 +256,7 @@ namespace aris::control
 		EthercatMotor& operator=(EthercatMotor &&other) = delete;
 
 	private:
-		class Imp;
+		struct Imp;
 		aris::core::ImpPtr<Imp> imp_;
 	};
 	class EthercatController :public EthercatMaster, public Controller

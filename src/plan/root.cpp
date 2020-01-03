@@ -1,6 +1,7 @@
 ﻿#include <algorithm>
 #include <future>
 #include <array>
+#include <charconv>
 
 #include"aris/plan/function.hpp"
 #include"aris/plan/root.hpp"
@@ -22,12 +23,14 @@ namespace aris::plan
 		aris::control::EthercatController *ec_controller_;
 		aris::server::ControlServer *cs_;
 
+		std::weak_ptr<Plan> shared_for_this_;
+
 		std::uint64_t option_;
 		std::vector<std::uint64_t> mot_options_;
 
-		std::string cmd_msg_;
-		std::string cmd_name_;
-		std::map<std::string, std::string> cmd_params_;
+		std::string_view cmd_msg_;
+		std::string_view cmd_name_;
+		std::map<std::string_view, std::string_view> cmd_params_;
 		
 		std::int64_t begin_global_count_;
 		std::uint64_t command_id_;
@@ -37,6 +40,16 @@ namespace aris::plan
 		std::any ret;
 		std::int32_t ret_code;
 		char ret_msg[1024]{};
+
+		template<typename Type>
+		auto inline getType(std::string_view param)->Type
+		{
+			Type ret;
+			auto value = cmd_params_.at(param);
+			auto result = std::from_chars(value.data(), value.data() + value.size(), ret);
+			if (result.ec == std::errc::invalid_argument) {	THROW_FILE_LINE("invalid argument for param:" + std::string(param));}
+			return ret;
+		}
 	};
 	auto Plan::command()->aris::core::Command & { return dynamic_cast<aris::core::Command&>(children().front()); }
 	auto Plan::count()->std::int64_t { return imp_->count_; }
@@ -46,14 +59,33 @@ namespace aris::plan
 	auto Plan::controller()->aris::control::Controller* { return imp_->controller_; }
 	auto Plan::ecMaster()->aris::control::EthercatMaster* { return imp_->ec_master_; }
 	auto Plan::ecController()->aris::control::EthercatController* { return imp_->ec_controller_; }
+	auto Plan::sharedPtrForThis()->std::shared_ptr<Plan> { return imp_->shared_for_this_.lock(); }
 	auto Plan::option()->std::uint64_t& { return imp_->option_; }
 	auto Plan::motorOptions()->std::vector<std::uint64_t>& { return imp_->mot_options_; }
-	auto Plan::cmdString()->const std::string& { return imp_->cmd_msg_; }
-	auto Plan::cmdName()->const std::string& { return imp_->cmd_name_; }
-	auto Plan::cmdParams()->const std::map<std::string, std::string>& { return imp_->cmd_params_; }
+	auto Plan::cmdString()->std::string_view { return imp_->cmd_msg_; }
+	auto Plan::cmdName()->std::string_view { return imp_->cmd_name_; }
+	auto Plan::cmdParams()->const std::map<std::string_view, std::string_view>& { return imp_->cmd_params_; }
 	auto Plan::cmdId()->std::int64_t { return imp_->command_id_; }
 	auto Plan::beginGlobalCount()->std::int64_t { return imp_->begin_global_count_; }
 	auto Plan::rtStastic()->aris::control::Master::RtStasticsData & { return imp_->rt_stastic_; }
+	auto Plan::doubleParam(std::string_view param_name)->double { return std::stod(std::string(cmdParams().at(param_name))); }
+	auto Plan::floatParam(std::string_view param_name)->float { return std::stod(std::string(cmdParams().at(param_name))); }
+	auto Plan::int32Param(std::string_view param_name)->std::int32_t { return imp_->getType<std::int32_t>(param_name); }
+	auto Plan::int64Param(std::string_view param_name)->std::int64_t { return imp_->getType<std::int64_t>(param_name); }
+	auto Plan::uint32Param(std::string_view param_name)->std::uint32_t { return imp_->getType<std::uint32_t>(param_name); }
+	auto Plan::uint64Param(std::string_view param_name)->std::uint64_t { return imp_->getType<std::uint64_t>(param_name); }
+	auto Plan::matrixParam(std::string_view param_name)->aris::core::Matrix
+	{
+		auto &value = cmdParams().at(param_name);
+		auto mat = model()->calculator().calculateExpression(std::string(value));
+		return std::any_cast<double>(&mat.second) ? aris::core::Matrix(std::any_cast<double>(mat.second)): std::any_cast<aris::core::Matrix&>(mat.second);
+	}
+	auto Plan::matrixParam(std::string_view param_name, int m, int n)->aris::core::Matrix
+	{
+		auto mat = matrixParam(param_name);
+		if (mat.m() != m || mat.n() != n) THROW_FILE_LINE("invalid matrix size");
+		return mat;
+	}
 	auto Plan::param()->std::any& { return imp_->param; }
 	auto Plan::ret()->std::any& { return imp_->ret; }
 	auto Plan::retCode()->std::int32_t& { return imp_->ret_code; }
@@ -62,16 +94,17 @@ namespace aris::plan
 	Plan::Plan(const std::string &name) :Object(name), imp_(new Imp) { add<aris::core::Command>(name); }
 	ARIS_DEFINE_BIG_FOUR_CPP(Plan);
 
-	struct PlanRoot::Imp { Imp() {} };
+	struct PlanRoot::Imp { aris::core::CommandParser parser_; };
 	auto PlanRoot::planPool()->aris::core::ObjectPool<Plan> & { return dynamic_cast<aris::core::ObjectPool<Plan> &>(children().front()); }
-	auto PlanRoot::planParser()->aris::core::CommandParser
+	auto PlanRoot::planParser()->aris::core::CommandParser&{ return imp_->parser_; }
+	auto PlanRoot::init()->void
 	{
-		aris::core::CommandParser parser;
-		for (auto &plan : planPool()) parser.commandPool().add<aris::core::Command>(plan.command());
-		return parser;
+		imp_->parser_.commandPool().clear();
+		for (auto &plan : planPool()) imp_->parser_.commandPool().add<aris::core::Command>(plan.command());
+		imp_->parser_.init();
 	}
 	PlanRoot::~PlanRoot() = default;
-	PlanRoot::PlanRoot(const std::string &name) :Object(name)
+	PlanRoot::PlanRoot(const std::string &name) :Object(name), imp_(new Imp)
 	{	
 		aris::core::Object::registerTypeGlobal<aris::core::ObjectPool<Plan> >();
 		add<aris::core::ObjectPool<Plan> >("plan_pool_object");
@@ -137,7 +170,7 @@ namespace aris::plan
 		"				</UniqueParam>"\
 		"			</GroupParam>"\
 		"		</UniqueParam>"
-	auto set_check_option(const std::map<std::string, std::string> &cmd_params, Plan &plan)->void
+	auto set_check_option(const std::map<std::string_view, std::string_view> &cmd_params, Plan &plan)->void
 	{
 		for (auto cmd_param : cmd_params)
 		{
@@ -294,7 +327,7 @@ namespace aris::plan
 		"			<Param name=\"physical_id\" abbreviation=\"p\" default=\"0\"/>"\
 		"			<Param name=\"slave_id\" abbreviation=\"s\" default=\"0\"/>"\
 		"		</UniqueParam>"
-	auto set_active_motor(const std::map<std::string, std::string> &cmd_params, Plan &plan, SetActiveMotor &param)->void
+	auto set_active_motor(const std::map<std::string_view, std::string_view> &cmd_params, Plan &plan, SetActiveMotor &param)->void
 	{
 		param.active_motor.clear();
 		param.active_motor.resize(plan.controller()->motionPool().size(), 0);
@@ -307,15 +340,15 @@ namespace aris::plan
 			}
 			else if (cmd_param.first == "motion_id")
 			{
-				param.active_motor.at(std::stoi(cmd_param.second)) = 1;
+				param.active_motor.at(plan.int32Param(cmd_param.first)) = 1;
 			}
 			else if (cmd_param.first == "physical_id")
 			{
-				param.active_motor.at(plan.controller()->motionAtPhy(std::stoi(cmd_param.second)).motId()) = 1;
+				param.active_motor.at(plan.controller()->motionAtPhy(plan.int32Param(cmd_param.first)).motId()) = 1;
 			}
 			else if (cmd_param.first == "slave_id")
 			{
-				param.active_motor.at(plan.controller()->motionAtSla(std::stoi(cmd_param.second)).motId()) = 1;
+				param.active_motor.at(plan.controller()->motionAtSla(plan.int32Param(cmd_param.first)).motId()) = 1;
 			}
 		}
 	}
@@ -333,14 +366,14 @@ namespace aris::plan
 		"		<Param name=\"acc\" default=\"0.1\"/>"\
 		"		<Param name=\"vel\" default=\"0.1\"/>"\
 		"		<Param name=\"dec\" default=\"0.1\"/>"
-	auto set_input_movement(const std::map<std::string, std::string> &cmd_params, Plan &plan, SetInputMovement &param)->void
+	auto set_input_movement(const std::map<std::string_view, std::string_view> &cmd_params, Plan &plan, SetInputMovement &param)->void
 	{
 		param.axis_begin_pos_vec.resize(plan.controller()->motionPool().size(), 0.0);
 		for (auto cmd_param : cmd_params)
 		{
 			if (cmd_param.first == "pos")
 			{
-				auto p = plan.model()->calculator().calculateExpression(cmd_param.second);
+				auto p = plan.matrixParam(cmd_param.first);
 				if (p.size() == 1)
 				{
 					param.axis_pos_vec.resize(plan.controller()->motionPool().size(), p.toDouble());
@@ -356,7 +389,7 @@ namespace aris::plan
 			}
 			else if (cmd_param.first == "acc")
 			{
-				auto a = plan.model()->calculator().calculateExpression(cmd_param.second);
+				auto a = plan.matrixParam(cmd_param.first);
 
 				if (a.size() == 1)
 				{
@@ -374,7 +407,7 @@ namespace aris::plan
 			}
 			else if (cmd_param.first == "vel")
 			{
-				auto v = plan.model()->calculator().calculateExpression(cmd_param.second);
+				auto v = plan.matrixParam(cmd_param.first);
 
 				if (v.size() == 1)
 				{
@@ -391,7 +424,7 @@ namespace aris::plan
 			}
 			else if (cmd_param.first == "dec")
 			{
-				auto d = plan.model()->calculator().calculateExpression(cmd_param.second);
+				auto d = plan.matrixParam(cmd_param.first);
 
 				if (d.size() == 1)
 				{
@@ -408,7 +441,7 @@ namespace aris::plan
 			}
 		}
 	}
-	auto check_input_movement(const std::map<std::string, std::string> &cmd_params, Plan &plan, SetInputMovement &param, SetActiveMotor &active)->void
+	auto check_input_movement(const std::map<std::string_view, std::string_view> &cmd_params, Plan &plan, SetInputMovement &param, SetActiveMotor &active)->void
 	{
 		auto c = plan.controller();
 		for (Size i = 0; i < c->motionPool().size(); ++i)
@@ -435,7 +468,7 @@ namespace aris::plan
 	{
 		set_check_option(cmdParams(), *this);
 		set_active_motor(cmdParams(), *this, *imp_);
-		imp_->limit_time = std::stoi(cmdParams().at("limit_time"));
+		imp_->limit_time = int32Param("limit_time");
 		
 		for (auto &option : motorOptions()) option |= 
 			aris::plan::Plan::NOT_CHECK_ENABLE | 
@@ -461,8 +494,7 @@ namespace aris::plan
 
 					if (count() % 1000 == 0)
 					{
-						controller()->mout() << "Unenabled motor, slave id: " << cm.id() 
-							<< ", absolute id: " << i << ", ret: " << ret << std::endl;
+						mout() << "Unenabled motor, slave id: " << cm.id() << ", absolute id: " << i << ", ret: " << ret << std::endl;
 					}
 				}
 			}
@@ -489,7 +521,7 @@ namespace aris::plan
 	{
 		set_check_option(cmdParams(), *this);
 		set_active_motor(cmdParams(), *this, *imp_);
-		imp_->limit_time = std::stoi(cmdParams().at("limit_time"));
+		imp_->limit_time = std::stoi(std::string(cmdParams().at("limit_time")));
 
 		for (auto &option : motorOptions()) option |= aris::plan::Plan::CHECK_NONE;
 
@@ -511,8 +543,7 @@ namespace aris::plan
 
 					if (count() % 1000 == 0)
 					{
-						controller()->mout() << "Undisabled motor, slave id: " << cm.id() 
-							<< ", absolute id: " << i << ", ret: " << ret << std::endl;
+						mout() << "Undisabled motor, slave id: " << cm.id() << ", absolute id: " << i << ", ret: " << ret << std::endl;
 					}
 				}
 			}
@@ -538,20 +569,20 @@ namespace aris::plan
 	auto Home::prepairNrt()->void
 	{
 		set_active_motor(cmdParams(), *this, *imp_);
-		imp_->limit_time = std::stoi(cmdParams().at("limit_time"));
+		imp_->limit_time = std::stoi(std::string(cmdParams().at("limit_time")));
 
 		for (aris::Size i = 0; i<imp_->active_motor.size(); ++i)
 		{
 			if (imp_->active_motor[i])
 			{
-				std::int8_t method = std::stoi(cmdParams().at(std::string("method")));
+				std::int8_t method = std::stoi(std::string(cmdParams().at("method")));
 				if (method < 1 || method > 35) THROW_FILE_LINE("invalid home method");
 
-				imp_->offset = std::stod(cmdParams().at(std::string("offset")));
-				std::int32_t offset = std::stoi(cmdParams().at(std::string("offset")));
-				std::uint32_t high_speed = std::stoi(cmdParams().at(std::string("high_speed")));
-				std::uint32_t low_speed = std::stoi(cmdParams().at(std::string("low_speed")));
-				std::uint32_t acc = std::stoi(cmdParams().at(std::string("acceleration")));
+				imp_->offset = std::stod(std::string(cmdParams().at("offset")));
+				std::int32_t offset = std::stoi(std::string(cmdParams().at("offset")));
+				std::uint32_t high_speed = std::stoi(std::string(cmdParams().at("high_speed")));
+				std::uint32_t low_speed = std::stoi(std::string(cmdParams().at("low_speed")));
+				std::uint32_t acc = std::stoi(std::string(cmdParams().at("acceleration")));
 
 				auto &cm = dynamic_cast<aris::control::EthercatMotor &>(controller()->motionPool()[i]);
 			
@@ -597,8 +628,7 @@ namespace aris::plan
 
 					if (count() % 1000 == 0)
 					{
-						controller()->mout() << "Unhomed motor, slave id: " << cm.id()
-							<< ", absolute id: " << i << ", ret: " << ret << std::endl;
+						mout() << "Unhomed motor, slave id: " << cm.id() << ", absolute id: " << i << ", ret: " << ret << std::endl;
 					}
 				}
 				else
@@ -634,8 +664,8 @@ namespace aris::plan
 	{
 		set_check_option(cmdParams(), *this);
 		set_active_motor(cmdParams(), *this, *imp_);
-		imp_->limit_time = std::stoi(cmdParams().at("limit_time"));
-		imp_->mode = std::stoi(cmdParams().at("mode"));
+		imp_->limit_time = std::stoi(std::string(cmdParams().at("limit_time")));
+		imp_->mode = std::stoi(std::string(cmdParams().at("mode")));
 
 		if (imp_->mode > 10 && imp_->mode < 8)THROW_FILE_LINE("invalid mode, aris now only support mode 8,9,10");
 
@@ -677,8 +707,7 @@ namespace aris::plan
 
 					if (count() % 1000 == 0)
 					{
-						controller()->mout() << "Unmoded motor, slave id: " << cm.id() 
-							<< ", absolute id: " << i << ", ret: " << ret << std::endl;
+						mout() << "Unmoded motor, slave id: " << cm.id() << ", absolute id: " << i << ", ret: " << ret << std::endl;
 					}
 				}
 			}
@@ -700,6 +729,19 @@ namespace aris::plan
 			"</Command>");
 	}
 	ARIS_DEFINE_BIG_FOUR_CPP(Mode);
+
+	auto Clear::prepairNrt()->void
+	{
+		aris::server::ControlServer::instance().waitForAllCollection();
+		aris::server::ControlServer::instance().clearError();
+		option() = NOT_RUN_EXECUTE_FUNCTION | NOT_RUN_COLLECT_FUNCTION;
+	}
+	Clear::Clear(const std::string &name) :Plan(name)
+	{
+		command().loadXmlStr(
+			"<Command name=\"cl\">"
+			"</Command>");
+	}
 
 	struct Reset::Imp :public SetActiveMotor, SetInputMovement { std::vector<Size> total_count_vec; };
 	auto Reset::prepairNrt()->void
@@ -840,7 +882,7 @@ namespace aris::plan
 	struct Sleep::Imp { int count; };
 	auto Sleep::prepairNrt()->void
 	{
-		imp_->count = std::stoi(cmdParams().at("count"));
+		imp_->count = std::stoi(std::string(cmdParams().at("count")));
 		for (auto &option : motorOptions()) option |= NOT_CHECK_ENABLE;
 
 		std::vector<std::pair<std::string, std::any>> ret_value;
@@ -880,7 +922,7 @@ namespace aris::plan
 		check_input_movement(cmdParams(), *this, *imp_, *imp_);
 
 		imp_->axis_begin_pos_vec.resize(controller()->motionPool().size());
-		for (auto &option : motorOptions()) option |= aris::plan::Plan::NOT_CHECK_ENABLE;
+		//for (auto &option : motorOptions()) option |= aris::plan::Plan::NOT_CHECK_ENABLE;
 
 		std::vector<std::pair<std::string, std::any>> ret_value;
 		ret() = ret_value;
@@ -905,7 +947,7 @@ namespace aris::plan
 			{
 				double p, v, a;
 				aris::Size t_count;
-				aris::plan::moveAbsolute(count(),
+				aris::plan::moveAbsolute(static_cast<double>(count()),
 					imp_->axis_begin_pos_vec[i], imp_->axis_pos_vec[i],
 					imp_->axis_vel_vec[i] / 1000, imp_->axis_acc_vec[i] / 1000 / 1000, imp_->axis_dec_vec[i] / 1000 / 1000,
 					p, v, a, t_count);
@@ -933,7 +975,7 @@ namespace aris::plan
 	}
 	ARIS_DEFINE_BIG_FOUR_CPP(MoveAbsJ);
 
-	auto check_eul_validity(const std::string &eul_type)->bool
+	auto check_eul_validity(std::string_view eul_type)->bool
 	{
 		if (eul_type.size()<3)return false;
 
@@ -943,7 +985,7 @@ namespace aris::plan
 
 		return true;
 	}
-	auto find_pq(const std::map<std::string, std::string> &params, aris::plan::Plan &plan, double *pq_out)->bool
+	auto find_pq(const std::map<std::string_view, std::string_view> &params, aris::plan::Plan &plan, double *pq_out)->bool
 	{
 		double pos_unit;
 		auto pos_unit_found = params.find("pos_unit");
@@ -957,7 +999,7 @@ namespace aris::plan
 		{
 			if (cmd_param.first == "pq")
 			{
-				auto pq_mat = plan.model()->calculator().calculateExpression(cmd_param.second);
+				auto pq_mat = plan.matrixParam(cmd_param.first);
 				if (pq_mat.size() != 7)THROW_FILE_LINE("");
 				aris::dynamic::s_vc(7, pq_mat.data(), pq_out);
 				aris::dynamic::s_nv(3, pos_unit, pq_out);
@@ -965,7 +1007,7 @@ namespace aris::plan
 			}
 			else if (cmd_param.first == "pm")
 			{
-				auto pm_mat = plan.model()->calculator().calculateExpression(cmd_param.second);
+				auto pm_mat = plan.matrixParam(cmd_param.first);
 				if (pm_mat.size() != 16)THROW_FILE_LINE("");
 				aris::dynamic::s_pm2pq(pm_mat.data(), pq_out);
 				aris::dynamic::s_nv(3, pos_unit, pq_out);
@@ -986,7 +1028,7 @@ namespace aris::plan
 				else if (check_eul_validity(eul_type_found->second.data()))	eul_type = eul_type_found->second;
 				else THROW_FILE_LINE("");
 
-				auto pe_mat = plan.model()->calculator().calculateExpression(cmd_param.second);
+				auto pe_mat = plan.matrixParam(cmd_param.first);
 				if (pe_mat.size() != 6)THROW_FILE_LINE("");
 				aris::dynamic::s_nv(3, ori_unit, pe_mat.data() + 3);
 				aris::dynamic::s_pe2pq(pe_mat.data(), pq_out, eul_type.data());
@@ -1026,7 +1068,7 @@ namespace aris::plan
 				mvj_param.joint_acc.clear();
 				mvj_param.joint_acc.resize(model()->motionPool().size(), 0.0);
 
-				auto acc_mat = model()->calculator().calculateExpression(cmd_param.second);
+				auto acc_mat = matrixParam(cmd_param.first);
 				if (acc_mat.size() == 1)std::fill(mvj_param.joint_acc.begin(), mvj_param.joint_acc.end(), acc_mat.toDouble());
 				else if (acc_mat.size() == model()->motionPool().size()) std::copy(acc_mat.begin(), acc_mat.end(), mvj_param.joint_acc.begin());
 				else THROW_FILE_LINE("");
@@ -1043,7 +1085,7 @@ namespace aris::plan
 				mvj_param.joint_vel.clear();
 				mvj_param.joint_vel.resize(model()->motionPool().size(), 0.0);
 
-				auto vel_mat = model()->calculator().calculateExpression(cmd_param.second);
+				auto vel_mat = matrixParam(cmd_param.first);
 				if (vel_mat.size() == 1)std::fill(mvj_param.joint_vel.begin(), mvj_param.joint_vel.end(), vel_mat.toDouble());
 				else if (vel_mat.size() == model()->motionPool().size()) std::copy(vel_mat.begin(), vel_mat.end(), mvj_param.joint_vel.begin());
 				else THROW_FILE_LINE("");
@@ -1060,7 +1102,7 @@ namespace aris::plan
 				mvj_param.joint_dec.clear();
 				mvj_param.joint_dec.resize(model()->motionPool().size(), 0.0);
 
-				auto dec_mat = model()->calculator().calculateExpression(cmd_param.second);
+				auto dec_mat = matrixParam(cmd_param.first);
 				if (dec_mat.size() == 1)std::fill(mvj_param.joint_dec.begin(), mvj_param.joint_dec.end(), dec_mat.toDouble());
 				else if (dec_mat.size() == model()->motionPool().size()) std::copy(dec_mat.begin(), dec_mat.end(), mvj_param.joint_dec.begin());
 				else THROW_FILE_LINE("");
@@ -1099,7 +1141,7 @@ namespace aris::plan
 			{
 				mvj_param->joint_pos_begin[i] = controller()->motionPool()[i].targetPos();
 				mvj_param->joint_pos_end[i] = model()->motionPool()[i].mp();
-				aris::plan::moveAbsolute(count(), mvj_param->joint_pos_begin[i], mvj_param->joint_pos_end[i]
+				aris::plan::moveAbsolute(static_cast<double>(count()), mvj_param->joint_pos_begin[i], mvj_param->joint_pos_end[i]
 					, mvj_param->joint_vel[i] / 1000, mvj_param->joint_acc[i] / 1000 / 1000, mvj_param->joint_dec[i] / 1000 / 1000
 					, p, v, a, mvj_param->total_count[i]);
 			}
@@ -1165,27 +1207,27 @@ namespace aris::plan
 		{
 			if (cmd_param.first == "acc")
 			{
-				mvl_param.acc = std::stod(cmd_param.second);
+				mvl_param.acc = doubleParam(cmd_param.first);
 			}
 			else if (cmd_param.first == "vel")
 			{
-				mvl_param.vel = std::stod(cmd_param.second);
+				mvl_param.vel = doubleParam(cmd_param.first);
 			}
 			else if (cmd_param.first == "dec")
 			{
-				mvl_param.dec = std::stod(cmd_param.second);
+				mvl_param.dec = doubleParam(cmd_param.first);
 			}
 			else if (cmd_param.first == "angular_acc")
 			{
-				mvl_param.angular_acc = std::stod(cmd_param.second);
+				mvl_param.angular_acc = doubleParam(cmd_param.first);
 			}
 			else if (cmd_param.first == "angular_vel")
 			{
-				mvl_param.angular_vel = std::stod(cmd_param.second);
+				mvl_param.angular_vel = doubleParam(cmd_param.first);
 			}
 			else if (cmd_param.first == "angular_dec")
 			{
-				mvl_param.angular_dec = std::stod(cmd_param.second);
+				mvl_param.angular_dec = doubleParam(cmd_param.first);
 			}
 		}
 
@@ -1217,22 +1259,22 @@ namespace aris::plan
 			norm_pos = aris::dynamic::s_norm(3, relative_pa);
 			norm_ori = aris::dynamic::s_norm(3, relative_pa + 3);
 
-			aris::plan::moveAbsolute(count(), 0.0, norm_pos, mvl_param->vel / 1000, mvl_param->acc / 1000 / 1000, mvl_param->dec / 1000 / 1000, p, v, a, pos_total_count);
-			aris::plan::moveAbsolute(count(), 0.0, norm_ori, mvl_param->angular_vel / 1000, mvl_param->angular_acc / 1000 / 1000, mvl_param->angular_dec / 1000 / 1000, p, v, a, ori_total_count);
+			aris::plan::moveAbsolute(static_cast<double>(count()), 0.0, norm_pos, mvl_param->vel / 1000, mvl_param->acc / 1000 / 1000, mvl_param->dec / 1000 / 1000, p, v, a, pos_total_count);
+			aris::plan::moveAbsolute(static_cast<double>(count()), 0.0, norm_ori, mvl_param->angular_vel / 1000, mvl_param->angular_acc / 1000 / 1000, mvl_param->angular_dec / 1000 / 1000, p, v, a, ori_total_count);
 
 			pos_ratio = pos_total_count < ori_total_count ? double(pos_total_count) / ori_total_count : 1.0;
 			ori_ratio = ori_total_count < pos_total_count ? double(ori_total_count) / pos_total_count : 1.0;
 
-			aris::plan::moveAbsolute(count(), 0.0, norm_pos, mvl_param->vel / 1000 * pos_ratio, mvl_param->acc / 1000 / 1000 * pos_ratio* pos_ratio, mvl_param->dec / 1000 / 1000 * pos_ratio* pos_ratio, p, v, a, pos_total_count);
-			aris::plan::moveAbsolute(count(), 0.0, norm_ori, mvl_param->angular_vel / 1000 * ori_ratio, mvl_param->angular_acc / 1000 / 1000 * ori_ratio * ori_ratio, mvl_param->angular_dec / 1000 / 1000 * ori_ratio * ori_ratio, p, v, a, ori_total_count);
+			aris::plan::moveAbsolute(static_cast<double>(count()), 0.0, norm_pos, mvl_param->vel / 1000 * pos_ratio, mvl_param->acc / 1000 / 1000 * pos_ratio* pos_ratio, mvl_param->dec / 1000 / 1000 * pos_ratio* pos_ratio, p, v, a, pos_total_count);
+			aris::plan::moveAbsolute(static_cast<double>(count()), 0.0, norm_ori, mvl_param->angular_vel / 1000 * ori_ratio, mvl_param->angular_acc / 1000 / 1000 * ori_ratio * ori_ratio, mvl_param->angular_dec / 1000 / 1000 * ori_ratio * ori_ratio, p, v, a, ori_total_count);
 		}
 
 		double pa[6]{ 0,0,0,0,0,0 }, pm[16], pm2[16];
 
-		aris::plan::moveAbsolute(count(), 0.0, norm_pos, mvl_param->vel / 1000 * pos_ratio, mvl_param->acc / 1000 / 1000 * pos_ratio* pos_ratio, mvl_param->dec / 1000 / 1000 * pos_ratio* pos_ratio, p, v, a, pos_total_count);
+		aris::plan::moveAbsolute(static_cast<double>(count()), 0.0, norm_pos, mvl_param->vel / 1000 * pos_ratio, mvl_param->acc / 1000 / 1000 * pos_ratio* pos_ratio, mvl_param->dec / 1000 / 1000 * pos_ratio* pos_ratio, p, v, a, pos_total_count);
 		if (norm_pos > 1e-10)aris::dynamic::s_vc(3, p / norm_pos, relative_pa, pa);
 
-		aris::plan::moveAbsolute(count(), 0.0, norm_ori, mvl_param->angular_vel / 1000 * ori_ratio, mvl_param->angular_acc / 1000 / 1000 * ori_ratio * ori_ratio, mvl_param->angular_dec / 1000 / 1000 * ori_ratio * ori_ratio, p, v, a, ori_total_count);
+		aris::plan::moveAbsolute(static_cast<double>(count()), 0.0, norm_ori, mvl_param->angular_vel / 1000 * ori_ratio, mvl_param->angular_acc / 1000 / 1000 * ori_ratio * ori_ratio, mvl_param->angular_dec / 1000 / 1000 * ori_ratio * ori_ratio, p, v, a, ori_total_count);
 		if (norm_ori > 1e-10)aris::dynamic::s_vc(3, p / norm_ori, relative_pa + 3, pa + 3);
 
 		aris::dynamic::s_pa2pm(pa, pm);
@@ -1312,28 +1354,28 @@ namespace aris::plan
 				imp_->eul_type = cmdParams().at("eul_type");
 				if (!check_eul_validity(imp_->eul_type))THROW_FILE_LINE("");
 
-				auto mat = model()->calculator().calculateExpression(cmdParams().at("max_pe"));
+				auto mat = matrixParam("max_pe");
 				if (mat.size() != 6)THROW_FILE_LINE("");
 				std::copy(mat.begin(), mat.end(), imp_->max_pe_);
 
-				mat = model()->calculator().calculateExpression(cmdParams().at("min_pe"));
+				mat = matrixParam("min_pe");
 				if (mat.size() != 6)THROW_FILE_LINE("");
 				std::copy(mat.begin(), mat.end(), imp_->min_pe_);
 
 				std::array<double, 24> pvade;
-				mat = model()->calculator().calculateExpression(cmdParams().at("init_pe"));
+				mat = matrixParam("init_pe");
 				if (mat.size() != 6)THROW_FILE_LINE("");
 				std::copy(mat.begin(), mat.end(), pvade.begin() + 0);
 
-				mat = model()->calculator().calculateExpression(cmdParams().at("init_ve"));
+				mat = matrixParam("init_ve");
 				if (mat.size() != 6)THROW_FILE_LINE("");
 				std::copy(mat.begin(), mat.end(), pvade.begin() + 6);
 
-				mat = model()->calculator().calculateExpression(cmdParams().at("init_ae"));
+				mat = matrixParam("init_ae");
 				if (mat.size() != 6)THROW_FILE_LINE("");
 				std::copy(mat.begin(), mat.end(), pvade.begin() + 12);
 
-				mat = model()->calculator().calculateExpression(cmdParams().at("init_de"));
+				mat = matrixParam("init_de");
 				if (mat.size() != 6)THROW_FILE_LINE("");
 				std::copy(mat.begin(), mat.end(), pvade.begin() + 18);
 
@@ -1355,19 +1397,19 @@ namespace aris::plan
 				if (!Imp::is_running_.load())THROW_FILE_LINE("auto mode not started, when pe");
 
 				std::array<double, 24> pvade;
-				auto mat = model()->calculator().calculateExpression(cmdParams().at("pe"));
+				auto mat = matrixParam("pe");
 				if (mat.size() != 6)THROW_FILE_LINE("");
 				std::copy(mat.begin(), mat.end(), pvade.begin() + 0);
 
-				mat = model()->calculator().calculateExpression(cmdParams().at("ve"));
+				mat = matrixParam("ve");
 				if (mat.size() != 6)THROW_FILE_LINE("");
 				std::copy(mat.begin(), mat.end(), pvade.begin() + 6);
 
-				mat = model()->calculator().calculateExpression(cmdParams().at("ae"));
+				mat = matrixParam("ae");
 				if (mat.size() != 6)THROW_FILE_LINE("");
 				std::copy(mat.begin(), mat.end(), pvade.begin() + 12);
 
-				mat = model()->calculator().calculateExpression(cmdParams().at("de"));
+				mat = matrixParam("de");
 				if (mat.size() != 6)THROW_FILE_LINE("");
 				std::copy(mat.begin(), mat.end(), pvade.begin() + 18);
 
@@ -1503,18 +1545,18 @@ namespace aris::plan
 				imp_->eul_type = cmdParams().at("eul_type");
 				if (!check_eul_validity(imp_->eul_type))THROW_FILE_LINE("");
 
-				imp_->increase_count = std::stoi(cmdParams().at("increase_count"));
+				imp_->increase_count = int32Param("increase_count");
 				if (imp_->increase_count < 0 || imp_->increase_count>1e5)THROW_FILE_LINE("");
 
-				auto mat = model()->calculator().calculateExpression(cmdParams().at("ve"));
+				auto mat = matrixParam("ve");
 				if (mat.size() != 6)THROW_FILE_LINE("");
 				std::copy(mat.begin(), mat.end(), imp_->ve_);
 
-				mat = model()->calculator().calculateExpression(cmdParams().at("ae"));
+				mat = matrixParam("ae");
 				if (mat.size() != 6)THROW_FILE_LINE("");
 				std::copy(mat.begin(), mat.end(), imp_->ae_);
 
-				mat = model()->calculator().calculateExpression(cmdParams().at("de"));
+				mat = matrixParam("de");
 				if (mat.size() != 6)THROW_FILE_LINE("");
 				std::copy(mat.begin(), mat.end(), imp_->de_);
 
@@ -1535,12 +1577,12 @@ namespace aris::plan
 				if (!Imp::is_running_.load())THROW_FILE_LINE("manual mode not started, when pe");
 
 				std::array<int, 6> is_increase;
-				is_increase[0] = std::stoi(cmdParams().at("x"));
-				is_increase[1] = std::stoi(cmdParams().at("y"));
-				is_increase[2] = std::stoi(cmdParams().at("z"));
-				is_increase[3] = std::stoi(cmdParams().at("a"));
-				is_increase[4] = std::stoi(cmdParams().at("b"));
-				is_increase[5] = std::stoi(cmdParams().at("c"));
+				is_increase[0] = int32Param("x");
+				is_increase[1] = int32Param("y");
+				is_increase[2] = int32Param("z");
+				is_increase[3] = int32Param("a");
+				is_increase[4] = int32Param("b");
+				is_increase[5] = int32Param("c");
 
 				for (auto &value : is_increase)value = std::max(std::min(1, value), -1) * imp_->increase_count;
 
@@ -1680,7 +1722,7 @@ namespace aris::plan
 		//controlServer()->loadXmlStr(xml_str);
 		// server load 会导致interface失败 ////////////////////////////////////////
 		aris::core::XmlDocument doc;
-		if(doc.Parse(xml_str.c_str()) != tinyxml2::XML_SUCCESS) THROW_FILE_LINE("XML failed");
+		if(doc.Parse(xml_str.data(), xml_str.size()) != tinyxml2::XML_SUCCESS) THROW_FILE_LINE("XML failed");
 
 		if (doc.RootElement()->FirstChildElement("EthercatController"))controlServer()->controller().loadXml(*doc.RootElement()->FirstChildElement("EthercatController"));
 		if (doc.RootElement()->FirstChildElement("Model"))controlServer()->model().loadXml(*doc.RootElement()->FirstChildElement("Model"));
@@ -1735,7 +1777,7 @@ namespace aris::plan
 
 	auto RemoveFile::prepairNrt()->void
 	{
-		std::uintmax_t  memo = std::stoull(cmdParams().at("memo"));
+		std::uintmax_t  memo = std::stoull(std::string(cmdParams().at("memo")));
 		auto file_path = cmdParams().at("filePath");
 
 		// 获得所有文件
@@ -1808,8 +1850,8 @@ namespace aris::plan
 	{
 		MoveSeriesParam param;
 		
-		auto x_mat = model()->calculator().calculateExpression(cmdParams().at("x"));
-		auto y_mat = model()->calculator().calculateExpression(cmdParams().at("y"));
+		auto x_mat = matrixParam("x");
+		auto y_mat = matrixParam("y");
 		if (x_mat.size() != y_mat.size())THROW_FILE_LINE("x and y size not correct");
 
 		param.t.resize(x_mat.size() + 6);
@@ -1837,7 +1879,7 @@ namespace aris::plan
 		*(param.y.end() - 3) = *(param.y.end() - 4);
 
 
-		auto scale = std::stod(cmdParams().at("scale"));
+		auto scale = doubleParam("scale");
 
 		for (int i = 1; i < x_mat.size(); ++i)
 		{
