@@ -28,12 +28,12 @@ namespace aris::plan
 		std::uint64_t option_;
 		std::vector<std::uint64_t> mot_options_;
 
-		std::string_view cmd_msg_;
+		std::vector<char> cmd_str_;
 		std::string_view cmd_name_;
 		std::map<std::string_view, std::string_view> cmd_params_;
 
 		std::int64_t begin_global_count_;
-		std::uint64_t command_id_;
+		std::uint64_t command_id_{0};
 		aris::control::Master::RtStasticsData rt_stastic_;
 
 		std::any param;
@@ -45,26 +45,60 @@ namespace aris::plan
 
 namespace aris::server
 {
+	// 当 executeCmd(str, callback) 时，系统内的执行流程如下：
+	// 1.   parse list
+	//   ---   all success : goto 2   ---err_code : SUCCESS                                             ---plan : new plan
+	//   ---   any throw   : goto 5a  ---err_code : PARSE_EXCEPTION      ---err_msg : exception.what()  ---plan : default empty plan
+	// 2.   prepare list
+	//   ---   all success : goto 3                                                                    
+	//   ---   any throw   : goto 5a  ---err_code : PREPARE_EXCEPTION    ---err_msg : exception.what()
+	// 3.   execute list Async
+	//   ---   not execute : goto 4a
+	//   ---       success : goto 4b
+	//   ---     sys error : goto 4a  ---err_code : SERVER_IN_ERROR      ---err_msg : same
+	//   --- sys not start : goto 4a  ---err_code : SERVER_NOT_STARTED   ---err_msg : same
+	//   --- cmd pool full : goto 4a  ---err_code : COMMAND_POOL_FULL    ---err_msg : same
+	//   ---     RT failed : goto 4b  ---err_code : CHECK or USER ERROR  ---err_msg : check or user
+	// 4a.  collect list Sync
+	//   ---   not collect : goto 5a
+	//   ---       success : goto 5a
+	// 4b.  collect list Async
+	//   ---   not collect : goto 5b
+	//   ---       success : goto 5b
+	// 5a.  callback Sync  : goto end
+	// 5b.  callback Async : goto end
+	// end
 	struct ControlServer::Imp
 	{
 		struct InternalData
 		{
 			std::shared_ptr<aris::plan::Plan> plan_;
 			std::function<void(aris::plan::Plan&)> post_callback_;
+			bool has_prepared_{ false }, has_run_{ false };
 
-			~InternalData() { if (post_callback_)post_callback_(*plan_); }
+			~InternalData()
+			{
+				// step 4a. 同步收集4a //
+				if (has_prepared_ && (!has_run_) && (!(plan_->option() & aris::plan::Plan::NOT_RUN_COLLECT_FUNCTION)))
+				{
+					LOG_INFO << "server collect cmd " << plan_->cmdId() << std::endl;
+					plan_->collectNrt();
+				}
+
+				// step 5a & 5b //
+				if (post_callback_)post_callback_(*plan_);
+			}
 		};
-		
+
 		auto tg()->void;
 		auto executeCmd(aris::plan::Plan &plan)->int;
 		auto checkMotion(const std::uint64_t *mot_options, char *error_msg, std::int64_t count_)->int;
 		auto fixError(bool is_in_check)->std::int32_t;
-		auto startReturnThread()->void;
 
 		Imp(ControlServer *server) :server_(server) {}
 		Imp(const Imp&) = delete;
 
-		std::recursive_mutex mu_running_;
+		std::recursive_mutex mu_running_, mu_collect_;
 		std::atomic_bool is_running_{ false };
 
 		ControlServer *server_;
@@ -75,7 +109,7 @@ namespace aris::server
 		// 实时循环中的轨迹参数 //
 		enum { CMD_POOL_SIZE = 1000 };
 		std::shared_ptr<InternalData> internal_data_queue_[CMD_POOL_SIZE];
-		
+
 		// 全局count //
 		std::atomic<std::int64_t> global_count_{ 0 };
 
@@ -113,21 +147,20 @@ namespace aris::server
 		std::atomic<PostCallback> post_callback_{ nullptr };
 
 		// execute in cmd line
-		std::function<void(aris::plan::Plan&)> cmdline_post_callback_;
-		std::string_view cmdline_msg_;
+		std::vector<std::pair<std::string_view, std::function<void(aris::plan::Plan&)> > > cmdline_cmd_vec_;
 		std::atomic_bool cmdline_msg_received_ = false;
-		std::shared_ptr<std::promise<std::shared_ptr<aris::plan::Plan>>> cmdline_execute_promise_;
+		std::shared_ptr<std::promise<std::vector<std::shared_ptr<aris::plan::Plan>> > > cmdline_execute_promise_;
 	};
 	auto ControlServer::Imp::tg()->void
 	{
 		// pre callback //
 		if (auto call = pre_callback_.load())call(ControlServer::instance());
-		
+
 		// 原子操作
-		auto global_count = ++global_count_; 
+		auto global_count = ++global_count_;
 		auto cmd_now = cmd_now_.load();
 		auto cmd_end = cmd_end_.load();
-		union{	std::int64_t err_code_and_fixed; struct { std::int32_t code; std::int32_t fix;	} err;};
+		union { std::int64_t err_code_and_fixed; struct { std::int32_t code; std::int32_t fix; } err; };
 		err_code_and_fixed = err_code_and_fixed_.load();
 
 		// 如果处于错误状态,或者错误还未清理完 //
@@ -160,26 +193,15 @@ namespace aris::server
 			// 执行命令
 			auto ret = executeCmd(plan);
 
-			// 检查错误 //
-			if (err.code = checkMotion(plan.motorOptions().data(), err_msg_, plan.count()); err.code < 0)
+			// 错误，包含系统检查出的错误以及用户返回错误 //
+			if (((err.code = checkMotion(plan.motorOptions().data(), err_msg_, plan.count())) < 0) || ((err.code = ret) < 0))
 			{
+				err.fix = fixError(true);
 				err_code_and_fixed_.store(err_code_and_fixed);
-				
+
 				// finish //
-				plan.imp_->ret_code = err.code;
 				std::copy_n(err_msg_, 1024, plan.imp_->ret_msg);
-				cmd_now_.store(cmd_end);// 原子操作
-				server_->controller().resetRtStasticData(nullptr, false);
-				server_->controller().lout() << std::flush;
-			}
-			// 非正常结束 //
-			else if (ret < 0)
-			{
-				err.code = ret;
-				err_code_and_fixed_.store(err_code_and_fixed);
-				
-				// finish //
-				plan.imp_->ret_code = ret;
+				plan.imp_->ret_code = err.code;
 				cmd_now_.store(cmd_end);// 原子操作
 				server_->controller().resetRtStasticData(nullptr, false);
 				server_->controller().lout() << std::flush;
@@ -189,8 +211,8 @@ namespace aris::server
 			{
 				// print info //
 				if (!(plan.option() & aris::plan::Plan::NOT_PRINT_EXECUTE_COUNT))
-					server_->controller().mout() << "cmd finished, spend " << plan.imp_->count_ << " counts\n\n";
-				
+					ARIS_MOUT_PLAN((&plan)) << "cmd finished, spend " << plan.imp_->count_ << " counts\n";
+
 				// finish //
 				plan.imp_->ret_code = aris::plan::Plan::SUCCESS;
 				cmd_now_.store(cmd_now + 1);//原子操作
@@ -202,14 +224,15 @@ namespace aris::server
 			{
 				// print info //
 				if (plan.imp_->count_ % 1000 == 0 && !(plan.option() & aris::plan::Plan::NOT_PRINT_EXECUTE_COUNT))
-					server_->controller().mout() << "execute cmd in count: " << plan.imp_->count_ << "\n";
+					ARIS_MOUT_PLAN((&plan)) << "execute cmd in count: " << plan.imp_->count_ << "\n";
 			}
 		}
 		// 否则检查idle状态
 		else if (err.code = checkMotion(global_mot_options_, err_msg_, 0); err.code < 0)
 		{
+			err.fix = fixError(true);
 			err_code_and_fixed_.store(err_code_and_fixed);
-			server_->controller().mout() << "failed when idle " << err.code << ":\n" << err_msg_ << "\n";
+			server_->controller().mout() << "RT  ---failed when idle " << err.code << ":\nRT  ---" << err_msg_ << "\n";
 		}
 
 		// 给与外部想要的数据 //
@@ -252,11 +275,11 @@ namespace aris::server
 		// 检查规划的指令是否合理（包括电机是否已经跟随上） //
 		for (std::size_t i = 0; i < controller_->motionPool().size(); ++i)
 		{
-			auto &cm = controller_->motionPool()[i];
-			auto &ld = last_pvc_[i];
-			auto &lld = last_last_pvc_[i];
-			auto option = mot_options[i];
-			auto dt = controller_->samplePeriodNs() / 1.0e9;
+			const auto &cm = controller_->motionPool()[i];
+			const auto &ld = last_pvc_[i];
+			const auto &lld = last_last_pvc_[i];
+			const auto option = mot_options[i];
+			const auto dt = controller_->samplePeriodNs() / 1.0e9;
 
 			// 检查使能 //
 			if (!(option & aris::plan::Plan::NOT_CHECK_ENABLE)
@@ -264,7 +287,7 @@ namespace aris::server
 			{
 				error_code = aris::plan::Plan::MOTION_NOT_ENABLED;
 				sprintf(error_msg, "%s_%d:\nMotion %zd is not in OPERATION_ENABLE mode in count %zd\n", __FILE__, __LINE__, i, count_);
-				goto FAILED;
+				return error_code;
 			}
 
 			// 使能时才检查 //
@@ -280,8 +303,8 @@ namespace aris::server
 						&& (cm.targetPos() > ld.p))
 					{
 						error_code = aris::plan::Plan::MOTION_POS_BEYOND_MAX;
-						sprintf(error_msg, "%s_%d:\nMotion %zu target position beyond MAX in count %zu:\nmax: %lf\tnow: %lf\n", __FILE__, __LINE__, i, count_, cm.maxPos(), cm.targetPos());
-						goto FAILED;
+						sprintf(error_msg, "%s_%d:\nMotion %zu target position beyond MAX in count %zu:\nmax: %f\tnow: %f\n", __FILE__, __LINE__, i, count_, cm.maxPos(), cm.targetPos());
+						return error_code;
 					}
 
 					// check pos min //
@@ -290,8 +313,8 @@ namespace aris::server
 						&& (cm.targetPos() < ld.p))
 					{
 						error_code = aris::plan::Plan::MOTION_POS_BEYOND_MIN;
-						sprintf(error_msg, "%s_%d:\nMotion %zu target position beyond MIN in count %zu:\nmin: %lf\tnow: %lf\n", __FILE__, __LINE__, i, count_, cm.minPos(), cm.targetPos());
-						goto FAILED;
+						sprintf(error_msg, "%s_%d:\nMotion %zu target position beyond MIN in count %zu:\nmin: %f\tnow: %f\n", __FILE__, __LINE__, i, count_, cm.minPos(), cm.targetPos());
+						return error_code;
 					}
 
 					// check pos continuous //
@@ -299,8 +322,8 @@ namespace aris::server
 						&& ((cm.targetPos() - ld.p) > dt * cm.maxVel() || (cm.targetPos() - ld.p) < dt * cm.minVel()))
 					{
 						error_code = aris::plan::Plan::MOTION_POS_NOT_CONTINUOUS;
-						sprintf(error_msg, "%s_%d:\nMotion %zu target position NOT CONTINUOUS in count %zu:\nlast: %lf\tnow: %lf\n", __FILE__, __LINE__, i, count_, last_pvc_[i].p, cm.targetPos());
-						goto FAILED;
+						sprintf(error_msg, "%s_%d:\nMotion %zu target position NOT CONTINUOUS in count %zu:\nlast: %f\tnow: %f\n", __FILE__, __LINE__, i, count_, ld.p, cm.targetPos());
+						return error_code;
 					}
 
 					// check pos continuous second order //
@@ -308,8 +331,8 @@ namespace aris::server
 						&& ((cm.targetPos() + lld.p - 2 * ld.p) > dt * dt * cm.maxAcc() || (cm.targetPos() + lld.p - 2 * ld.p) < dt * dt * cm.minAcc()))
 					{
 						error_code = aris::plan::Plan::MOTION_POS_NOT_CONTINUOUS_SECOND_ORDER;
-						sprintf(error_msg, "%s_%d:\nMotion %zu target position NOT SECOND CONTINUOUS in count %zu:\nlast last: %lf\tlast: %lf\tnow: %lf\n", __FILE__, __LINE__, i, count_, lld.p, last_pvc_[i].p, cm.targetPos());
-						goto FAILED;
+						sprintf(error_msg, "%s_%d:\nMotion %zu target position NOT SECOND CONTINUOUS in count %zu:\nlast last: %f\tlast: %f\tnow: %f\n", __FILE__, __LINE__, i, count_, lld.p, ld.p, cm.targetPos());
+						return error_code;
 					}
 
 					// check pos following error //
@@ -317,8 +340,8 @@ namespace aris::server
 						&& (std::abs(cm.targetPos() - cm.actualPos()) > cm.maxPosFollowingError()))
 					{
 						error_code = aris::plan::Plan::MOTION_POS_FOLLOWING_ERROR;
-						sprintf(error_msg, "%s_%d:\nMotion %zu target position has FOLLOW ERROR in count %zu:\nactual: %lf\ttarget: %lf\n", __FILE__, __LINE__, i, count_, cm.actualPos(), cm.targetPos());
-						goto FAILED;
+						sprintf(error_msg, "%s_%d:\nMotion %zu target position has FOLLOW ERROR in count %zu:\nactual: %f\ttarget: %f\n", __FILE__, __LINE__, i, count_, cm.actualPos(), cm.targetPos());
+						return error_code;
 					}
 
 					break;
@@ -330,8 +353,8 @@ namespace aris::server
 						&& (cm.targetVel() > cm.maxVel()))
 					{
 						error_code = aris::plan::Plan::MOTION_VEL_BEYOND_MAX;
-						sprintf(error_msg, "%s_%d:\nMotion %zu target velocity beyond MAX in count %zu:\nmax: %lf\tnow: %lf\n", __FILE__, __LINE__, i, count_, cm.maxVel(), cm.targetVel());
-						goto FAILED;
+						sprintf(error_msg, "%s_%d:\nMotion %zu target velocity beyond MAX in count %zu:\nmax: %f\tnow: %f\n", __FILE__, __LINE__, i, count_, cm.maxVel(), cm.targetVel());
+						return error_code;
 					}
 
 					// check vel min //
@@ -339,8 +362,8 @@ namespace aris::server
 						&& (cm.targetVel() < cm.minVel()))
 					{
 						error_code = aris::plan::Plan::MOTION_VEL_BEYOND_MIN;
-						sprintf(error_msg, "%s_%d:\nMotion %zu target velocity beyond MIN in count %zu:\nmin: %lf\tnow: %lf\n", __FILE__, __LINE__, i, count_, cm.minVel(), cm.targetVel());
-						goto FAILED;
+						sprintf(error_msg, "%s_%d:\nMotion %zu target velocity beyond MIN in count %zu:\nmin: %f\tnow: %f\n", __FILE__, __LINE__, i, count_, cm.minVel(), cm.targetVel());
+						return error_code;
 					}
 
 					// check vel continuous //
@@ -348,8 +371,8 @@ namespace aris::server
 						&& ((cm.targetVel() - ld.v) > dt * cm.maxAcc() || (cm.targetVel() - ld.v) < dt * cm.minAcc()))
 					{
 						error_code = aris::plan::Plan::MOTION_VEL_NOT_CONTINUOUS;
-						sprintf(error_msg, "%s_%d:\nMotion %zu target velocity NOT CONTINUOUS in count %zu:\nlast: %lf\tnow: %lf\n", __FILE__, __LINE__, i, count_, last_pvc_[i].v, cm.targetVel());
-						goto FAILED;
+						sprintf(error_msg, "%s_%d:\nMotion %zu target velocity NOT CONTINUOUS in count %zu:\nlast: %f\tnow: %f\n", __FILE__, __LINE__, i, count_, ld.v, cm.targetVel());
+						return error_code;
 					}
 
 					// check vel following error //
@@ -357,8 +380,8 @@ namespace aris::server
 						&& (std::abs(cm.targetVel() - cm.actualVel()) > cm.maxVelFollowingError()))
 					{
 						error_code = aris::plan::Plan::MOTION_VEL_FOLLOWING_ERROR;
-						sprintf(error_msg, "%s_%d:\nMotion %zu target velocity has FOLLOW ERROR in count %zu:\nactual: %lf\ttarget: %lf\n", __FILE__, __LINE__, i, count_, cm.actualVel(), cm.targetVel());
-						goto FAILED;
+						sprintf(error_msg, "%s_%d:\nMotion %zu target velocity has FOLLOW ERROR in count %zu:\nactual: %f\ttarget: %f\n", __FILE__, __LINE__, i, count_, cm.actualVel(), cm.targetVel());
+						return error_code;
 					}
 
 					break;
@@ -370,8 +393,8 @@ namespace aris::server
 						&& (cm.actualPos() > cm.maxPos()))
 					{
 						error_code = aris::plan::Plan::MOTION_POS_BEYOND_MAX;
-						sprintf(error_msg, "%s_%d:\nMotion %zu target position beyond MAX in count %zu:\nmax: %lf\tnow: %lf\n", __FILE__, __LINE__, i, count_, cm.maxPos(), cm.targetPos());
-						goto FAILED;
+						sprintf(error_msg, "%s_%d:\nMotion %zu target position beyond MAX in count %zu:\nmax: %f\tnow: %f\n", __FILE__, __LINE__, i, count_, cm.maxPos(), cm.targetPos());
+						return error_code;
 					}
 
 					// check pos min //
@@ -379,8 +402,8 @@ namespace aris::server
 						&& (cm.actualPos() < cm.minPos()))
 					{
 						error_code = aris::plan::Plan::MOTION_POS_BEYOND_MIN;
-						sprintf(error_msg, "%s_%d:\nMotion %zu target position beyond MIN in count %zu:\nmin: %lf\tnow: %lf\n", __FILE__, __LINE__, i, count_, cm.minPos(), cm.targetPos());
-						goto FAILED;
+						sprintf(error_msg, "%s_%d:\nMotion %zu target position beyond MIN in count %zu:\nmin: %f\tnow: %f\n", __FILE__, __LINE__, i, count_, cm.minPos(), cm.targetPos());
+						return error_code;
 					}
 
 					// check vel max //
@@ -388,8 +411,8 @@ namespace aris::server
 						&& (cm.actualVel() > cm.maxVel()))
 					{
 						error_code = aris::plan::Plan::MOTION_VEL_BEYOND_MAX;
-						sprintf(error_msg, "%s_%d:\nMotion %zu target velocity beyond MAX in count %zu:\nmax: %lf\tnow: %lf\n", __FILE__, __LINE__, i, count_, cm.maxVel(), cm.actualVel());
-						goto FAILED;
+						sprintf(error_msg, "%s_%d:\nMotion %zu target velocity beyond MAX in count %zu:\nmax: %f\tnow: %f\n", __FILE__, __LINE__, i, count_, cm.maxVel(), cm.actualVel());
+						return error_code;
 					}
 
 					// check vel min //
@@ -397,8 +420,8 @@ namespace aris::server
 						&& (cm.actualVel() < cm.minVel()))
 					{
 						error_code = aris::plan::Plan::MOTION_VEL_BEYOND_MIN;
-						sprintf(error_msg, "%s_%d:\nMotion %zu target velocity beyond MIN in count %zu:\nmin: %lf\tnow: %lf\n", __FILE__, __LINE__, i, count_, cm.minVel(), cm.actualVel());
-						goto FAILED;
+						sprintf(error_msg, "%s_%d:\nMotion %zu target velocity beyond MIN in count %zu:\nmin: %f\tnow: %f\n", __FILE__, __LINE__, i, count_, cm.minVel(), cm.actualVel());
+						return error_code;
 					}
 
 					// check vel continuous //
@@ -406,8 +429,8 @@ namespace aris::server
 						&& ((cm.actualVel() - ld.v) > dt * cm.maxAcc() || (cm.actualVel() - ld.v) < dt * cm.minAcc()))
 					{
 						error_code = aris::plan::Plan::MOTION_VEL_NOT_CONTINUOUS;
-						sprintf(error_msg, "%s_%d:\nMotion %zu velocity NOT CONTINUOUS in count %zu:\nlast: %lf\tnow: %lf\n", __FILE__, __LINE__, i, count_, last_pvc_[i].p, cm.targetPos());
-						goto FAILED;
+						sprintf(error_msg, "%s_%d:\nMotion %zu velocity NOT CONTINUOUS in count %zu:\nlast: %f\tnow: %f\n", __FILE__, __LINE__, i, count_, ld.p, cm.targetPos());
+						return error_code;
 					}
 					break;
 				}
@@ -418,7 +441,7 @@ namespace aris::server
 					{
 						error_code = aris::plan::Plan::MOTION_INVALID_MODE;
 						sprintf(error_msg, "%s_%d:\nMotion %zu MODE INVALID in count %zu:\nmode: %d\n", __FILE__, __LINE__, i, count_, cm.modeOfOperation());
-						goto FAILED;
+						return error_code;
 					}
 				}
 				}
@@ -434,10 +457,6 @@ namespace aris::server
 		}
 		std::swap(last_pvc_, last_last_pvc_);
 		return 0;
-
-	FAILED:
-		fixError(true);
-		return error_code;
 	}
 	auto ControlServer::Imp::fixError(bool is_in_check)->std::int32_t
 	{
@@ -449,7 +468,7 @@ namespace aris::server
 			switch (cm.modeOfOperation())
 			{
 			case 8:
-				if (is_in_check) cm.setTargetPos(cm.actualPos());
+				if (is_in_check) cm.setTargetPos(((last_pvc_[i].p - cm.actualPos()) > cm.maxVel() || (last_pvc_[i].p - cm.actualPos()) < cm.minVel()) ? cm.actualPos() : last_pvc_[i].p);
 				break;
 			case 9:
 				cm.setTargetVel(0.0);
@@ -483,8 +502,8 @@ namespace aris::server
 	}
 	auto ControlServer::resetModel(dynamic::Model *model)->void
 	{
-		auto iter = std::find_if(children().begin(), children().end(), [&](const aris::core::Object &obj) 
-		{ 
+		auto iter = std::find_if(children().begin(), children().end(), [&](const aris::core::Object &obj)
+		{
 			auto found = dynamic_cast<const aris::dynamic::Model*>(&obj);
 			return found && imp_->model_ == found;
 		});
@@ -494,8 +513,8 @@ namespace aris::server
 	}
 	auto ControlServer::resetController(control::Controller *controller)->void
 	{
-		auto iter = std::find_if(children().begin(), children().end(), [&](const aris::core::Object &obj) 
-		{ 
+		auto iter = std::find_if(children().begin(), children().end(), [&](const aris::core::Object &obj)
+		{
 			auto found = dynamic_cast<const aris::control::Controller*>(&obj);
 			return found && imp_->controller_ == found;
 		});
@@ -505,8 +524,8 @@ namespace aris::server
 	}
 	auto ControlServer::resetSensorRoot(sensor::SensorRoot *sensor_root)->void
 	{
-		auto iter = std::find_if(children().begin(), children().end(), [&](const aris::core::Object &obj) 
-		{ 
+		auto iter = std::find_if(children().begin(), children().end(), [&](const aris::core::Object &obj)
+		{
 			auto found = dynamic_cast<const aris::sensor::SensorRoot*>(&obj);
 			return found && imp_->sensor_root_ == found;
 		});
@@ -516,7 +535,7 @@ namespace aris::server
 	}
 	auto ControlServer::resetPlanRoot(plan::PlanRoot *plan_root)->void
 	{
-		auto iter = std::find_if(children().begin(), children().end(), [&](const aris::core::Object &obj) 
+		auto iter = std::find_if(children().begin(), children().end(), [&](const aris::core::Object &obj)
 		{
 			auto found = dynamic_cast<const aris::plan::PlanRoot*>(&obj);
 			return found && imp_->plan_root_ == found;
@@ -531,8 +550,8 @@ namespace aris::server
 	auto ControlServer::planRoot()->plan::PlanRoot& { return *imp_->plan_root_; }
 	auto ControlServer::interfacePool()->aris::core::ObjectPool<aris::server::Interface>& { return *imp_->interface_pool_; }
 	auto ControlServer::interfaceRoot()->InterfaceRoot& { return *imp_->interface_root_; }
-	auto ControlServer::errorCode()const->int 
-	{ 
+	auto ControlServer::errorCode()const->int
+	{
 		union { std::int64_t err_code_and_fixed; struct { std::int32_t err_code; std::int32_t is_fixed; } err; };
 		err_code_and_fixed = imp_->err_code_and_fixed_.load();
 		return err.err_code;
@@ -548,11 +567,7 @@ namespace aris::server
 		auto cmd_end = imp_->cmd_end_.load();
 		return cmd_end > cmd_now ? imp_->internal_data_queue_[cmd_now % Imp::CMD_POOL_SIZE]->plan_.get() : nullptr;
 	}
-	auto ControlServer::open()->void 
-	{
-		planRoot().init();
-		for (auto &inter : interfacePool()) inter.open();
-	}
+	auto ControlServer::open()->void{ for (auto &inter : interfacePool()) inter.open();	}
 	auto ControlServer::close()->void { for (auto &inter : interfacePool()) inter.close(); }
 	auto ControlServer::runCmdLine()->void
 	{
@@ -560,6 +575,7 @@ namespace aris::server
 		{
 			std::string command_in;
 			std::getline(std::cin, command_in);
+			if (command_in.empty())std::this_thread::sleep_for(std::chrono::milliseconds(1));
 			return command_in;
 		});
 
@@ -568,31 +584,29 @@ namespace aris::server
 			// 检测是否有数据从executeCmdInMain过来
 			if (imp_->cmdline_msg_received_)
 			{
-				try
-				{
-					auto target = executeCmd(std::string_view(imp_->cmdline_msg_.data(), imp_->cmdline_msg_.size()), imp_->cmdline_post_callback_);
-					imp_->cmdline_msg_received_ = false;
-					imp_->cmdline_execute_promise_->set_value(target);
-				}
-				catch (...)
-				{
-					imp_->cmdline_msg_received_ = false;
-					imp_->cmdline_execute_promise_->set_exception(std::current_exception());
-				}
+				auto ret_plan = executeCmd(imp_->cmdline_cmd_vec_);
+				imp_->cmdline_msg_received_ = false;
+				imp_->cmdline_execute_promise_->set_value(ret_plan);
 			}
 			// 检测是否有数据从command line过来
 			else if (ret.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
 			{
-				executeCmd(ret.get(), [](aris::plan::Plan &plan)->void
+				// 在linux后台可能getline失败，得到空字符串 //
+				if (auto cmd_str = ret.get(); !cmd_str.empty())
 				{
-					std::cout << "return code   :" << plan.retCode() << "\nreturn message:" << plan.retMsg() << std::endl;
-					LOG_INFO << "return code   :" << plan.retCode() << "\nreturn message:" << plan.retMsg() << std::endl;
-				});
+					executeCmd(cmd_str, [](aris::plan::Plan &plan)->void
+					{
+						ARIS_COUT_PLAN((&plan)) << "return code :" << plan.retCode() << "\n";
+						ARIS_COUT_PLAN((&plan)) << "return msg  :" << plan.retMsg() << std::endl;
+						LOG_INFO << "cmd " << plan.cmdId() << " return code   :" << plan.retCode() << "\n" << std::setw(aris::core::LOG_SPACE_WIDTH) << '|' << "return message:" << plan.retMsg() << std::endl;
+					});
+				}
 
 				ret = std::async(std::launch::async, []()->std::string
 				{
 					std::string command_in;
 					std::getline(std::cin, command_in);
+					if (command_in.empty())std::this_thread::sleep_for(std::chrono::milliseconds(1));
 					return command_in;
 				});
 			}
@@ -603,188 +617,232 @@ namespace aris::server
 			}
 		}
 	}
-	auto ControlServer::executeCmd(std::string_view cmd_str, std::function<void(aris::plan::Plan&)> post_callback)->std::shared_ptr<aris::plan::Plan>
+	//
+	// 1.每个输入的str,一定会有返回的plan，即使parse失败
+	// 2.任何一个str parse失败，全部指令都不执行
+	// 3.任何一个prepare失败，全部指令都不执行
+	// 4.任何一个prepare失败，之前prepare成功的会collect，其他的不会（只有prepare且成功的，才会collect）
+	auto ControlServer::executeCmd(std::vector<std::pair<std::string_view, std::function<void(aris::plan::Plan&)> > > cmd_vec)->std::vector<std::shared_ptr<aris::plan::Plan>>
 	{
+		// 当 executeCmd(str, callback) 时，系统内的执行流程如下：
+		// 1.   parse str
+		//   ---       success : goto 2   ---err_code : SUCCESS                                             ---plan : new plan
+		//   ---       throw   : goto 5a  ---err_code : PARSE_EXCEPTION      ---err_msg : exception.what()  ---plan : default empty plan
+		// 2.   prepare plan
+		//   ---       success : goto 3                                                                    
+		//   ---       throw   : goto 5a  ---err_code : PREPARE_EXCEPTION    ---err_msg : exception.what()
+		// 3.   execute plan Async
+		//   ---   not execute : goto 4a
+		//   ---       success : goto 4b
+		//   ---     sys error : goto 4a  ---err_code : SERVER_IN_ERROR      ---err_msg : same
+		//   --- sys not start : goto 4a  ---err_code : SERVER_NOT_STARTED   ---err_msg : same
+		//   --- cmd pool full : goto 4a  ---err_code : COMMAND_POOL_FULL    ---err_msg : same
+		//   ---     RT failed : goto 4b  ---err_code : CHECK or USER ERROR  ---err_msg : check or user
+		// 4a.  collect plan Sync
+		//   ---   not collect : goto 5a
+		//   ---       success : goto 5a
+		// 4b.  collect plan Async
+		//   ---   not collect : goto 5b
+		//   ---       success : goto 5b
+		// 5a.  callback Sync  : goto end
+		// 5b.  callback Async : goto end
+		// end
 		std::unique_lock<std::recursive_mutex> running_lck(imp_->mu_running_);
 
-		// init internal data with an empty plan //
-		static std::shared_ptr<aris::plan::Plan> default_return_plan(new aris::plan::Plan);
-		auto internal_data = std::shared_ptr<Imp::InternalData>(new Imp::InternalData{ default_return_plan, post_callback});
-		auto &plan = internal_data->plan_;
-
-		// parse //
+		// step 1.  parse //
+		std::vector<std::shared_ptr<Imp::InternalData>> internal_data;
+		std::vector<std::shared_ptr<aris::plan::Plan>> ret_plan;
 		static std::uint64_t cmd_id{ 0 };
-		try	
-		{ 
-			++cmd_id;
-			LOG_INFO << "server parse cmd " << std::to_string(cmd_id) << " : " << cmd_str << std::endl;
-			auto [cmd, params] = planRoot().planParser().parse(cmd_str);
-			auto plan_iter = std::find_if(planRoot().planPool().begin(), planRoot().planPool().end(), [&](const plan::Plan &p) {return p.command().name() == cmd; });
-			plan = std::shared_ptr<aris::plan::Plan>(dynamic_cast<aris::plan::Plan*>(plan_iter->getTypeInfo(plan_iter->type())->copy_construct_func(*plan_iter)));
-			plan->imp_->count_ = 0;
-			plan->imp_->model_ = imp_->model_;
-			plan->imp_->master_ = imp_->controller_;
-			plan->imp_->controller_ = dynamic_cast<aris::control::Controller*>(plan->imp_->master_);
-			plan->imp_->ec_master_ = dynamic_cast<aris::control::EthercatMaster*>(plan->imp_->master_);
-			plan->imp_->ec_controller_ = dynamic_cast<aris::control::EthercatController*>(plan->imp_->master_);
-			plan->imp_->cs_ = this;
-			plan->imp_->shared_for_this_ = plan;
-			plan->imp_->option_ = 0;
-			plan->imp_->mot_options_.resize(plan->imp_->controller_->motionPool().size(), 0);
-			plan->imp_->cmd_msg_ = cmd_str;
-			plan->imp_->cmd_name_ = std::move(cmd);
-			plan->imp_->cmd_params_ = std::move(params);
-			plan->imp_->begin_global_count_ = 0;
-			plan->imp_->command_id_ = cmd_id;
-			plan->imp_->rt_stastic_ = aris::control::Master::RtStasticsData{ 0,0,0,0x8fffffff,0,0,0 };
-			plan->retCode() = 0;
-			std::fill_n(plan->retMsg(), 1024, '\0');
-		}
-		catch (std::exception &e)
+		for (auto &[str, post_callback] : cmd_vec)
 		{
-			plan->retCode() = aris::plan::Plan::PARSE_EXCEPTION;
-			std::fill_n(plan->retMsg(), 1024, '\0');
-			std::copy_n(e.what(), std::strlen(e.what()), plan->retMsg());
-			return plan;
+			internal_data.push_back(std::shared_ptr<Imp::InternalData>(new Imp::InternalData{ std::shared_ptr<aris::plan::Plan>(nullptr), post_callback }));
+			auto &plan = internal_data.back()->plan_;
+			try
+			{
+				std::vector<char> cmd_str_local(str.size());
+				std::copy(str.begin(), str.end(), cmd_str_local.begin());
+				str = std::string_view(cmd_str_local.data(), cmd_str_local.size());
+
+				++cmd_id;
+				LOG_INFO << "server parse cmd " << std::to_string(cmd_id) << " : " << str << std::endl;
+				auto[cmd, params] = planRoot().planParser().parse(str);
+				auto plan_iter = std::find_if(planRoot().planPool().begin(), planRoot().planPool().end(), [&](const plan::Plan &p) {return p.command().name() == cmd; });
+				plan = std::shared_ptr<aris::plan::Plan>(dynamic_cast<aris::plan::Plan*>(plan_iter->getTypeInfo(plan_iter->type())->copy_construct_func(*plan_iter)));
+				plan->imp_->count_ = 0;
+				plan->imp_->model_ = imp_->model_;
+				plan->imp_->master_ = imp_->controller_;
+				plan->imp_->controller_ = dynamic_cast<aris::control::Controller*>(plan->imp_->master_);
+				plan->imp_->ec_master_ = dynamic_cast<aris::control::EthercatMaster*>(plan->imp_->master_);
+				plan->imp_->ec_controller_ = dynamic_cast<aris::control::EthercatController*>(plan->imp_->master_);
+				plan->imp_->cs_ = this;
+				plan->imp_->shared_for_this_ = plan;
+				plan->imp_->option_ = 0;
+				plan->imp_->mot_options_.resize(plan->imp_->controller_->motionPool().size(), 0);
+				plan->imp_->cmd_str_ = std::move(cmd_str_local);
+				plan->imp_->cmd_name_ = std::move(cmd);
+				plan->imp_->cmd_params_ = std::move(params);
+				plan->imp_->begin_global_count_ = 0;
+				plan->imp_->command_id_ = cmd_id;
+				plan->imp_->rt_stastic_ = aris::control::Master::RtStasticsData{ 0,0,0,0x8fffffff,0,0,0 };
+				plan->imp_->ret_code = aris::plan::Plan::SUCCESS;
+				std::fill_n(plan->imp_->ret_msg, 1024, '\0');
+				ret_plan.push_back(plan);
+			}
+			catch (std::exception &e)
+			{
+				for (auto &p : ret_plan)p->imp_->ret_code = aris::plan::Plan::PREPARE_CANCELLED;
+				plan = std::shared_ptr<aris::plan::Plan>(new aris::plan::Plan);
+				plan->imp_->ret_code = aris::plan::Plan::PARSE_EXCEPTION;
+				std::fill_n(plan->imp_->ret_msg, 1024, '\0');
+				std::copy_n(e.what(), std::strlen(e.what()), plan->imp_->ret_msg);
+				ret_plan.push_back(plan);
+
+				// 确保每个输入str都有输出plan //
+				for (auto i = ret_plan.size(); i < cmd_vec.size(); ++i)
+				{
+					ret_plan.push_back(std::shared_ptr<aris::plan::Plan>(new aris::plan::Plan));
+					ret_plan.back()->imp_->ret_code = aris::plan::Plan::PREPARE_CANCELLED;
+				}
+
+				return ret_plan;
+			}
 		}
 
-		// prepair //
-		try
+		// step 2.  prepare //
+		for (auto p = internal_data.begin(); p < internal_data.end(); ++p)
 		{
-			LOG_INFO << "server prepair cmd " << std::to_string(cmd_id) << std::endl;
-			plan->prepairNrt();
-		}
-		catch (std::exception &e)
-		{
-			plan->retCode() = aris::plan::Plan::PREPARE_EXCEPTION;
-			std::copy_n(e.what(), std::strlen(e.what()), plan->retMsg());
-			return plan;
-		}
-		
-		// print and log cmd info /////////////////////////////////////////////////////////////////////////////////////////////////////////////
-		auto print_size = plan->cmdParams().empty() ? 2 : 2 + std::max_element(plan->cmdParams().begin(), plan->cmdParams().end(), [](const auto& a, const auto& b)
-		{
-			return a.first.length() < b.first.length();
-		})->first.length();
-		// print
-		if (!(plan->option() & aris::plan::Plan::NOT_PRINT_CMD_INFO))
-		{
-			std::cout << plan->cmdName() << std::endl;
-			for (auto &p : plan->cmdParams())std::cout << std::string(print_size - p.first.length(), ' ') << p.first << " : " << p.second << std::endl;
-			std::cout << std::endl;
-		}
-		// log
-		if (!(plan->option() & aris::plan::Plan::NOT_LOG_CMD_INFO))
-		{
-			auto &log = LOG_INFO << plan->cmdName() << std::endl;
-			for (auto &p : plan->cmdParams())
+			auto &plan = (*p)->plan_;
+			try
 			{
-				log << std::setw(aris::core::LOG_SPACE_WIDTH) << '|' << std::string(print_size - p.first.length(), ' ') << p.first << " : " << p.second << std::endl;
+				LOG_INFO << "server prepare cmd " << std::to_string(plan->cmdId()) << std::endl;
+				plan->prepareNrt();
+				(*p)->has_prepared_ = true;
+			}
+			catch (std::exception &e)
+			{
+				for (auto pp = internal_data.begin(); pp < internal_data.end(); ++pp)
+				{
+					(*pp)->plan_->imp_->ret_code = pp < p ? aris::plan::Plan::EXECUTE_CANCELLED : aris::plan::Plan::PREPARE_CANCELLED;
+				}
+				plan->imp_->ret_code = aris::plan::Plan::PREPARE_EXCEPTION;
+				std::copy_n(e.what(), std::strlen(e.what()), plan->imp_->ret_msg);
+				return ret_plan;
+			}
+		}
+
+		// print and log cmd info /////////////////////////////////////////////////////////////////////////////////////////////////////////////
+		for (auto &plan : ret_plan)
+		{
+			auto print_size = plan->cmdParams().empty() ? 2 : 2 + std::max_element(plan->cmdParams().begin(), plan->cmdParams().end(), [](const auto& a, const auto& b)
+			{
+				return a.first.length() < b.first.length();
+			})->first.length();
+			// print
+			if (!(plan->option() & aris::plan::Plan::NOT_PRINT_CMD_INFO))
+			{
+				ARIS_COUT << "cmd " << plan->cmdId() << "---" << plan->cmdString() << "\n";
+				ARIS_COUT_PLAN(plan) << plan->cmdName() << "\n";
+				for (auto &p : plan->cmdParams())ARIS_COUT_PLAN(plan) << std::string(print_size - p.first.length(), ' ') << p.first << " : " << p.second << "\n";
+				ARIS_COUT << std::endl;
+			}
+			// log
+			if (!(plan->option() & aris::plan::Plan::NOT_LOG_CMD_INFO))
+			{
+				auto &log = LOG_INFO << plan->cmdName() << "\n";
+				for (auto &p : plan->cmdParams())
+				{
+					log << std::setw(aris::core::LOG_SPACE_WIDTH) << '|' << std::string(print_size - p.first.length(), ' ') << p.first << " : " << p.second << std::endl;
+				}
 			}
 		}
 		// print over ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-		// 既不execute也不collect，直接返回 //
-		if ((plan->option() & aris::plan::Plan::NOT_RUN_EXECUTE_FUNCTION) && (plan->option() & aris::plan::Plan::NOT_RUN_COLLECT_FUNCTION))
-		{
-			plan->retCode() = aris::plan::Plan::SUCCESS;
-		}
-
-		// execute //
+		// step 3.  execute //
 		auto cmd_end = imp_->cmd_end_.load();
-		try
+		std::vector<std::shared_ptr<Imp::InternalData>> need_run_internal;
+		for (auto p = internal_data.begin(); p < internal_data.end(); ++p)
 		{
-			if (!(plan->option() & aris::plan::Plan::NOT_RUN_EXECUTE_FUNCTION))
+			auto &plan = (*p)->plan_;
+			try
 			{
-				// 查看是否处于错误状态 //
-				if (this->errorCode()) LOG_AND_THROW(std::runtime_error("system in error, use rc to recover"));
-				
-				// 只有实时循环才需要 server 已经在运行
-				if (!imp_->is_running_)LOG_AND_THROW(std::runtime_error("server not running, use cs_start to start"));
-
-				// 等待所有任务完成 //
-				if (plan->option() & aris::plan::Plan::EXECUTE_WHEN_ALL_PLAN_EXECUTED) waitForAllExecution();
-
-				// 等待所有任务收集 //
-				if (plan->option() & aris::plan::Plan::EXECUTE_WHEN_ALL_PLAN_COLLECTED) waitForAllCollection();
-
-				// 判断是否等待命令池清空 //
-				if ((!(plan->option() & aris::plan::Plan::WAIT_IF_CMD_POOL_IS_FULL)) && (cmd_end - imp_->cmd_collect_.load()) >= Imp::CMD_POOL_SIZE)//原子操作(cmd_now)
-					LOG_AND_THROW(std::runtime_error("command pool is full"));
-				else
-					while ((cmd_end - imp_->cmd_collect_.load()) >= Imp::CMD_POOL_SIZE)std::this_thread::sleep_for(std::chrono::milliseconds(1));
-
-				// 添加命令 //
-				LOG_INFO << "server execute cmd " << std::to_string(cmd_id) << std::endl;
-				imp_->internal_data_queue_[cmd_end % Imp::CMD_POOL_SIZE] = internal_data;
-				imp_->cmd_end_.store(++cmd_end); // 原子操作 //
-
-				 // 等待当前任务完成 //
-				if (plan->option() & aris::plan::Plan::WAIT_FOR_EXECUTION)waitForAllExecution();
-			}
-		}
-		catch (std::exception &e)
-		{
-			plan->retCode() = aris::plan::Plan::EXECUTE_EXCEPTION;
-			std::copy_n(e.what(), std::strlen(e.what()), plan->retMsg());
-			return plan;
-		}
-
-		// collect //
-		try
-		{
-			if (!(plan->option() & aris::plan::Plan::NOT_RUN_COLLECT_FUNCTION))
-			{
-				// 没有实时规划的轨迹，直接同步收集 //
-				if (plan->option() & aris::plan::Plan::NOT_RUN_EXECUTE_FUNCTION)
+				if (!(plan->option() & aris::plan::Plan::NOT_RUN_EXECUTE_FUNCTION))
 				{
-					// 等待所有任务完成，原子操作 //
-					while ((plan->option() & aris::plan::Plan::COLLECT_WHEN_ALL_PLAN_EXECUTED) && (cmd_end != imp_->cmd_now_.load()))std::this_thread::sleep_for(std::chrono::milliseconds(1));
+					// 查看是否处于错误状态 //
+					if (this->errorCode())
+					{
+						plan->imp_->ret_code = aris::plan::Plan::SERVER_IN_ERROR;
+						LOG_AND_THROW(std::runtime_error("server in error, use cl to clear"));
+					}
 
-					// 等待所有任务收集，原子操作 //
-					while ((plan->option() & aris::plan::Plan::COLLECT_WHEN_ALL_PLAN_COLLECTED) && (cmd_end != imp_->cmd_collect_.load()))std::this_thread::sleep_for(std::chrono::milliseconds(1));
+					// 只有实时循环才需要 server 已经在运行
+					if (!imp_->is_running_)
+					{
+						plan->imp_->ret_code = aris::plan::Plan::SERVER_NOT_STARTED;
+						LOG_AND_THROW(std::runtime_error("server not started, use cs_start to start"));
+					}
 
-					LOG_INFO << "server collect cmd " << plan->cmdId() << std::endl;
-					plan->collectNrt();
-					plan->retCode() = aris::plan::Plan::SUCCESS;
-				}
-				// 等待当前实时任务收集 //
-				else
-				{
-					// 等待当前任务收集 //
-					if (plan->option() & aris::plan::Plan::WAIT_FOR_COLLECTION)waitForAllCollection();
+					if ((cmd_end - imp_->cmd_collect_.load() + need_run_internal.size()) >= Imp::CMD_POOL_SIZE)//原子操作(cmd_now)
+					{
+						plan->imp_->ret_code = aris::plan::Plan::COMMAND_POOL_IS_FULL;
+						LOG_AND_THROW(std::runtime_error("command pool is full"));
+					}
+
+					need_run_internal.push_back(*p);
 				}
 			}
-		}
-		catch (std::exception &e)
-		{
-			plan->retCode() = aris::plan::Plan::COLLECT_EXCEPTION;
-			std::copy_n(e.what(), std::strlen(e.what()), plan->retMsg());
-			return plan;
-		}
+			catch (std::exception &e)
+			{
+				for (auto pp = std::next(p); pp < internal_data.end(); ++pp)
+					if (!((*pp)->plan_->option() & aris::plan::Plan::NOT_RUN_EXECUTE_FUNCTION))
+						(*pp)->plan_->imp_->ret_code = aris::plan::Plan::EXECUTE_CANCELLED;
 
-		return plan;
+				std::copy_n(e.what(), std::strlen(e.what()), plan->imp_->ret_msg);
+				return ret_plan;
+			}
+		}
+		// 添加命令 //
+		for (auto &inter : need_run_internal)
+		{
+			imp_->internal_data_queue_[cmd_end++ % Imp::CMD_POOL_SIZE] = inter;
+			inter->has_run_ = true;
+			LOG_INFO << "server execute cmd " << std::to_string(inter->plan_->cmdId()) << std::endl;
+		}
+		imp_->cmd_end_.store(cmd_end);
+
+		// step 4a&5a. USE RAII //
+		return ret_plan;
 	}
-	auto ControlServer::executeCmdInCmdLine(std::string_view cmd_string, std::function<void(aris::plan::Plan&)> post_callback)->std::shared_ptr<aris::plan::Plan>
+	auto ControlServer::executeCmd(std::string_view cmd_str, std::function<void(aris::plan::Plan&)> post_callback)->std::shared_ptr<aris::plan::Plan>
+	{
+		std::vector<std::pair<std::string_view, std::function<void(aris::plan::Plan&)> > > cmd_vec{ std::make_pair(cmd_str, post_callback) };
+		auto ret = executeCmd(cmd_vec);
+		return ret.front();
+	}
+	auto ControlServer::executeCmdInCmdLine(std::vector<std::pair<std::string_view, std::function<void(aris::plan::Plan&)>>> cmd_vec)->std::vector<std::shared_ptr<aris::plan::Plan>>
 	{
 		static std::mutex mu_;
 		std::unique_lock<std::mutex> lck(mu_);
 
-		imp_->cmdline_execute_promise_ = std::make_shared<std::promise<std::shared_ptr<aris::plan::Plan>>>();
+		imp_->cmdline_execute_promise_ = std::make_shared<std::promise<std::vector<std::shared_ptr<aris::plan::Plan>>>>();
 		auto ret = imp_->cmdline_execute_promise_->get_future();
-		imp_->cmdline_msg_ = cmd_string;
-		imp_->cmdline_post_callback_ = post_callback;
+		imp_->cmdline_cmd_vec_ = cmd_vec;
 		imp_->cmdline_msg_received_ = true;
 
 		return ret.get();
 	}
-	auto ControlServer::start()->void
+	auto ControlServer::executeCmdInCmdLine(std::string_view cmd_string, std::function<void(aris::plan::Plan&)> post_callback)->std::shared_ptr<aris::plan::Plan>
 	{
-		std::unique_lock<std::recursive_mutex> running_lck(imp_->mu_running_);
-		if (imp_->is_running_)LOG_AND_THROW(std::runtime_error("failed to start server, because it is already started "));
-		imp_->is_running_ = true;
+		std::vector<std::pair<std::string_view, std::function<void(aris::plan::Plan&)> > > cmd_vec{ std::make_pair(cmd_string, post_callback) };
+		auto ret = executeCmdInCmdLine(cmd_vec);
+		return ret.front();
+	}
+	auto ControlServer::init()->void
+	{
+		model().init();
+		controller().init();
+		planRoot().init();
 
-		// 分配所需要的内存 //
+		// 分配自身所需要的内存 //
 		Size mem_size = 0;
 
 		core::allocMem(mem_size, imp_->last_pvc_, controller().slavePool().size());
@@ -804,6 +862,30 @@ namespace aris::server
 		imp_->cmd_now_.store(0);
 		imp_->cmd_end_.store(0);
 		imp_->cmd_collect_.store(0);
+	}
+	auto ControlServer::start()->void
+	{
+		std::unique_lock<std::recursive_mutex> running_lck(imp_->mu_running_);
+		if (imp_->is_running_)LOG_AND_THROW(std::runtime_error("failed to start server, because it is already started "));
+		
+		struct RaiiCollector
+		{
+			ControlServer *cs_;
+			auto reset()->void { cs_ = nullptr; }
+			RaiiCollector(ControlServer *cs) :cs_(cs) {}
+			~RaiiCollector() 
+			{
+				if (cs_)
+				{
+					cs_->imp_->is_running_ = false;
+					cs_->imp_->is_collect_running_ = false;
+					if (cs_->imp_->collect_thread_.joinable())cs_->imp_->collect_thread_.join();
+				}
+			}
+		};
+		RaiiCollector raii_collector(this);
+
+		imp_->is_running_ = true;
 
 		// start collect thread //
 		imp_->is_collect_running_ = true;
@@ -814,12 +896,15 @@ namespace aris::server
 				auto cmd_collect = imp_->cmd_collect_.load();//原子操作
 				auto cmd_now = imp_->cmd_now_.load();//原子操作
 
+				// step 4b. //
 				if (cmd_collect < cmd_now)
 				{
 					auto &internal_data = imp_->internal_data_queue_[cmd_collect % Imp::CMD_POOL_SIZE];
 					auto &plan = *internal_data->plan_;
 
-					while (globalCount() < plan.beginGlobalCount() + plan.count()) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+					// make rt stastic thread safe //
+					auto begin_global_count = globalCount();
+					while (begin_global_count == globalCount()) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
 					LOG_INFO << "cmd " << plan.cmdId() << " stastics:" << std::endl
 						<< std::setw(aris::core::LOG_SPACE_WIDTH) << '|' << std::setw(20) << "avg time(ns):" << std::int64_t(plan.rtStastic().avg_time_consumed) << std::endl
 						<< std::setw(aris::core::LOG_SPACE_WIDTH) << '|' << std::setw(20) << "max time(ns):" << plan.rtStastic().max_time_consumed << std::endl
@@ -829,12 +914,14 @@ namespace aris::server
 						<< std::setw(aris::core::LOG_SPACE_WIDTH) << '|' << std::setw(20) << "total count:" << plan.rtStastic().total_count << std::endl
 						<< std::setw(aris::core::LOG_SPACE_WIDTH) << '|' << std::setw(20) << "overruns:" << plan.rtStastic().overrun_count << std::endl;
 
-					if (!(plan.option() & aris::plan::Plan::NOT_RUN_COLLECT_FUNCTION)) 
+					// step 4b&5b, 不能用RAII，因为reset的时候先减智能指针引用计数，此时currentCollectPlan 无法再获取到 internal_data了 //
+					if (!(plan.option() & aris::plan::Plan::NOT_RUN_COLLECT_FUNCTION))
 					{
 						LOG_INFO << "server collect cmd " << plan.cmdId() << std::endl;
 						plan.collectNrt();
 					}
-					imp_->cmd_collect_.store(cmd_collect + 1);
+					aris::server::ControlServer::instance().imp_->cmd_collect_++;
+					std::unique_lock<std::recursive_mutex> running_lck(imp_->mu_collect_);
 					internal_data.reset();
 				}
 				else
@@ -846,6 +933,8 @@ namespace aris::server
 
 		sensorRoot().start();
 		controller().start();
+
+		raii_collector.reset();
 	}
 	auto ControlServer::stop()->void
 	{
@@ -865,35 +954,27 @@ namespace aris::server
 	}
 	auto ControlServer::waitForAllExecution()->void 
 	{
-		std::unique_lock<std::recursive_mutex> running_lck(imp_->mu_running_);
-		auto cmd_end = imp_->cmd_end_.load();//原子操作
-		while (cmd_end != imp_->cmd_now_.load())std::this_thread::sleep_for(std::chrono::milliseconds(1));//原子操作
+		while (imp_->cmd_end_.load() != imp_->cmd_now_.load())std::this_thread::sleep_for(std::chrono::milliseconds(1));//原子操作
 	}
 	auto ControlServer::waitForAllCollection()->void 
 	{
-		std::unique_lock<std::recursive_mutex> running_lck(imp_->mu_running_);
-		auto cmd_end = imp_->cmd_end_.load();//原子操作
-		while (cmd_end != imp_->cmd_collect_.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));//原子操作
+		while (imp_->cmd_end_.load() != imp_->cmd_collect_.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));//原子操作
 	}
 	auto ControlServer::currentExecutePlan()->std::shared_ptr<aris::plan::Plan>
 	{
-		std::unique_lock<std::recursive_mutex> running_lck(imp_->mu_running_);
+		std::unique_lock<std::recursive_mutex> running_lck(imp_->mu_collect_);
 		if (!imp_->is_running_)LOG_AND_THROW(std::runtime_error("failed to get current TARGET, because ControlServer is not running"));
 
 		auto execute_internal = imp_->internal_data_queue_[imp_->cmd_now_.load() % Imp::CMD_POOL_SIZE];
-		if (execute_internal) return execute_internal->plan_;
-
-		return std::shared_ptr<aris::plan::Plan>();
+		return execute_internal ? execute_internal->plan_ : std::shared_ptr<aris::plan::Plan>();
 	}
 	auto ControlServer::currentCollectPlan()->std::shared_ptr<aris::plan::Plan>
 	{
-		std::unique_lock<std::recursive_mutex> running_lck(imp_->mu_running_);
+		std::unique_lock<std::recursive_mutex> running_lck(imp_->mu_collect_);
 		if (!imp_->is_running_)LOG_AND_THROW(std::runtime_error("failed to get current TARGET, because ControlServer is not running"));
 
 		auto collect_internal = imp_->internal_data_queue_[imp_->cmd_collect_.load() % Imp::CMD_POOL_SIZE];
-		if (collect_internal) return collect_internal->plan_;
-
-		return std::shared_ptr<aris::plan::Plan>();
+		return collect_internal ? collect_internal->plan_ : std::shared_ptr<aris::plan::Plan>();
 	}
 	auto ControlServer::getRtData(const std::function<void(ControlServer&, const aris::plan::Plan *, std::any&)>& get_func, std::any& data)->void
 	{
@@ -912,13 +993,24 @@ namespace aris::server
 	}
 	auto ControlServer::clearError()->void 
 	{ 
-		while (imp_->err_code_and_fixed_.load())
+		std::unique_lock<std::recursive_mutex> running_lck(imp_->mu_running_);
+		if (!imp_->is_running_)
 		{
-			union { std::int64_t err_code_and_fixed; struct { std::int32_t err_code; std::int32_t is_fixed; } err; };
-			err.err_code = 0;
-			err.is_fixed = 0xFFFF'FFFF;
-			imp_->err_code_and_fixed_ &= err_code_and_fixed;
-			std::this_thread::sleep_for(std::chrono::nanoseconds(controller().samplePeriodNs()));
+			imp_->err_code_and_fixed_.store(0);
+			std::fill_n(imp_->err_msg_, 1024, '\0');
+		}
+		else
+		{
+			while (imp_->err_code_and_fixed_.load())
+			{
+				union { std::int64_t err_code_and_fixed; struct { std::int32_t err_code; std::int32_t is_fixed; } err; };
+				err.err_code = 0;
+				err.is_fixed = 0xFFFF'FFFF;
+				imp_->err_code_and_fixed_ &= err_code_and_fixed;
+				std::this_thread::sleep_for(std::chrono::nanoseconds(controller().samplePeriodNs()));
+			}
+
+			std::fill_n(imp_->err_msg_, 1024, '\0');
 		}
 	}
 	ControlServer::~ControlServer() 

@@ -463,9 +463,9 @@ namespace aris::core
 					}
 
 					//////////////////////////////////保护，数据不能太大///////////////////////////////
-					if (payload_len > 0x00080000 || payload_len + payload_data.size() > 0x00100000)
+					if (payload_len < 0 || payload_len > 0x00080000 || payload_len + payload_data.size() > 0x00100000)
 					{
-						LOG_ERROR << "websocket receive too large object" << std::endl;
+						LOG_ERROR << "websocket receive too large or negative object, size:" << payload_len << std::endl;
 						imp->lose_tcp();
 						return;
 					}
@@ -486,19 +486,24 @@ namespace aris::core
 					}
 				}
 
+				//////////////////////////////////保护，最短长度不能小于MsgHeader的数据长度///////////////////////////////
+				if (payload_data.size() < sizeof(aris::core::MsgHeader))
+				{
+					LOG_ERROR << "websocket espect msg, but receive raw data" << std::endl;
+					break;
+				}
+
 				// 把web sock 的东西转成 msg //
 				recv_msg.resize(static_cast<aris::core::MsgSize>(payload_data.size() - sizeof(aris::core::MsgHeader)));
 				std::copy(payload_data.data(), payload_data.data() + payload_data.size(), reinterpret_cast<char*>(&recv_msg.header()));
 
 				if (recv_msg.size() != payload_data.size() - sizeof(aris::core::MsgHeader))
 				{
-					LOG_ERROR << "websocket receive wrong msg size" << std::endl;
-					imp->lose_tcp();
-					return;
+					LOG_ERROR << "websocket receive wrong msg size, msg size:" << recv_msg.size() << "payload size:" << payload_data.size() << std::endl;
+					break;
 				}
 
 				if (imp->onReceivedMsg)imp->onReceivedMsg(imp->socket_, recv_msg);
-
 				break;
 			}
 			case WEB_RAW:
@@ -983,6 +988,11 @@ namespace aris::core
 				break;
 			}
 			default:
+				//auto packed_data = imp_->is_server_ ? pack_data_server(data, size) : pack_data_client(data, size);
+				//if (send(imp_->recv_socket_, packed_data.data(), static_cast<int>(packed_data.size()), 0) == -1)
+				//	THROW_FILE_LINE("Socket failed sending data, because network failed\n");
+				//else
+				//	return;
 				THROW_FILE_LINE("Socket failed send raw data, because Socket is not at right MODE\n");
 			}
 		}

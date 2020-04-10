@@ -87,8 +87,6 @@ namespace aris::control
 				if (mst.imp_->this_stastics_)add_time_to_stastics(time, mst.imp_->this_stastics_);
 				if (mst.imp_->is_need_change_)mst.imp_->this_stastics_ = mst.imp_->next_stastics_;
 			}
-
-			mst.imp_->is_mout_thread_running_ = false;
 		}
 
 		// slave //
@@ -105,7 +103,6 @@ namespace aris::control
 		std::function<void()> strategy_{ nullptr };
 
 		// running flag //
-		std::mutex mu_running_;
 		std::atomic_bool is_rt_thread_running_{ false };
 		std::atomic_bool is_mout_thread_running_{ false };
 
@@ -140,12 +137,8 @@ namespace aris::control
 		imp_->mout_pipe_ = findOrInsert<aris::core::Pipe>("mout_pipe");
 		imp_->lout_pipe_ = findOrInsert<aris::core::Pipe>("lout_pipe");
 	}
-	auto Master::start()->void
+	auto Master::init()->void
 	{
-		std::unique_lock<std::mutex> running_lck(imp_->mu_running_);
-		if (imp_->is_rt_thread_running_)THROW_FILE_LINE("master already running, so cannot start");
-		imp_->is_rt_thread_running_ = true;
-
 		// make vec_phy2abs //
 		imp_->sla_vec_phy2abs_.clear();
 		for (auto &sla : slavePool())
@@ -154,9 +147,29 @@ namespace aris::control
 			if (imp_->sla_vec_phy2abs_.at(sla.phyId()) != -1) THROW_FILE_LINE("invalid Master::Slave phy id:\"" + std::to_string(sla.phyId()) + "\" of slave \"" + sla.name() + "\" already exists");
 			imp_->sla_vec_phy2abs_.at(sla.phyId()) = sla.id();
 		}
+	}
+	auto Master::start()->void
+	{
+		if (imp_->is_rt_thread_running_)THROW_FILE_LINE("master already running, so cannot start");
+		imp_->is_rt_thread_running_ = true;
 
-		// init child master //
-		init();
+		struct RaiiCollector
+		{
+			Master *self_;
+			auto reset()->void { self_ = nullptr; }
+			RaiiCollector(Master *self) :self_(self) {}
+			~RaiiCollector()
+			{
+				if (self_)
+				{
+					self_->imp_->is_rt_thread_running_ = false;
+					aris_rt_task_join(self_->rtHandle());
+					self_->imp_->is_mout_thread_running_ = false;
+					if (self_->imp_->mout_thread_.joinable())self_->imp_->mout_thread_.join();
+				}
+			}
+		};
+		RaiiCollector raii_collector(this);
 
 		// lock memory // 
 		aris_mlockall();
@@ -165,7 +178,7 @@ namespace aris::control
 		imp_->is_mout_thread_running_ = true;
 		imp_->mout_thread_ = std::thread([this]()
 		{
-			// prepair lout //
+			// prepare lout //
 			auto file_name = aris::core::logDirPath() / ("rt_log--" + aris::core::logFileTimeFormat(std::chrono::system_clock::now()) + "--");
 			std::fstream file;
 			file.open(file_name.string() + "0.txt", std::ios::out | std::ios::trunc);
@@ -194,7 +207,7 @@ namespace aris::control
 				}
 				else if (imp_->mout_pipe_->recvMsg(msg))
 				{
-					if (!msg.empty())std::cout << msg.toString() << std::flush;
+					if (!msg.empty())aris::core::cout() << msg.toString() << std::flush;
 				}
 				else
 				{
@@ -222,17 +235,19 @@ namespace aris::control
 		imp_->rt_task_handle_ = aris_rt_task_create();
 		if (!imp_->rt_task_handle_.has_value()) THROW_FILE_LINE("rt_task_create failed");
 		if (aris_rt_task_start(rtHandle(), &Imp::rt_task_func, this))THROW_FILE_LINE("rt_task_start failed");
+
+		raii_collector.reset();
 	}
 	auto Master::stop()->void
 	{
-		std::unique_lock<std::mutex> running_lck(imp_->mu_running_);
 		if (!imp_->is_rt_thread_running_)THROW_FILE_LINE("master is not running, so can't stop");
-		imp_->is_rt_thread_running_ = false;
-
+		
 		// join rt task //
+		imp_->is_rt_thread_running_ = false;
 		if (aris_rt_task_join(rtHandle()))THROW_FILE_LINE("aris_rt_task_join failed");
 
 		// join mout task //
+		imp_->is_mout_thread_running_ = false;
 		imp_->mout_thread_.join();
 
 		// release child resources //
@@ -240,7 +255,6 @@ namespace aris::control
 	}
 	auto Master::setControlStrategy(std::function<void()> strategy)->void
 	{
-		std::unique_lock<std::mutex> running_lck(imp_->mu_running_);
 		if (imp_->is_rt_thread_running_)THROW_FILE_LINE("master already running, cannot set control strategy");
 		imp_->strategy_ = strategy;
 	}
@@ -306,7 +320,7 @@ namespace aris::control
 			imp_->is_need_change_ = !is_new_data_include_this_count;
 		}
 	}
-	auto Master::setSamplePeriodNs(int period_ns) {	imp_->sample_period_ns_ = period_ns;}
+	auto Master::setSamplePeriodNs(int period_ns)->void {	imp_->sample_period_ns_ = period_ns;}
 	auto Master::samplePeriodNs()const ->int { return imp_->sample_period_ns_; }
 	Master::~Master() = default;
 	Master::Master(const std::string &name) :imp_(new Imp), Object(name)

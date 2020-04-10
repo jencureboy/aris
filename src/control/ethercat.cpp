@@ -284,6 +284,7 @@ namespace aris::control
 	}
 	auto EthercatMaster::init()->void
 	{
+		Master::init();
 		// make pdo map for each slave //
 		for (auto &sla : slavePool())
 		{
@@ -312,9 +313,8 @@ namespace aris::control
 				}
 			}
 		}
-
-		aris_ecrt_master_request(this);
 	}
+	auto EthercatMaster::start()->void { aris_ecrt_master_request(this); Master::start(); }
 	auto EthercatMaster::release()->void { aris_ecrt_master_stop(this); }
 	auto EthercatMaster::send()->void { aris_ecrt_master_send(this); }
 	auto EthercatMaster::recv()->void { aris_ecrt_master_recv(this); }
@@ -883,16 +883,12 @@ namespace aris::control
 	EthercatMotor::EthercatMotor(const EthercatMotor &other) = default;
 	EthercatMotor& EthercatMotor::operator=(const EthercatMotor &other) = default;
 
-	struct EthercatController::Imp
-	{
-		MotionPool motion_pool_{nullptr};
-	};
+	struct EthercatController::Imp { MotionPool motion_pool_{ nullptr }; };
 	auto EthercatController::motionPool()->MotionPool& { return imp_->motion_pool_; }
 	auto EthercatController::init()->void
 	{ 
-		EthercatMaster::init(); 
 		Controller::init();
-
+		EthercatMaster::init(); 
 		imp_->motion_pool_ = MotionPool(&slavePool());
 		motionPool().update();
 	}

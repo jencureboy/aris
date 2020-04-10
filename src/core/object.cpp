@@ -6,11 +6,11 @@
 #include <string>
 #include <algorithm>
 #include <limits>
+#include <regex>
 
 #include "aris/core/log.hpp"
 #include "aris/core/object.hpp"
-
-using namespace std;
+#include "aris/core/reflection.hpp"
 
 namespace aris::core
 {
@@ -340,7 +340,10 @@ namespace aris::core
 	auto Object::saveXml(aris::core::XmlElement &xml_ele) const->void
 	{
 		xml_ele.DeleteChildren();
-		xml_ele.SetName(type().c_str());
+
+		// xml namespace only contain one :, so change :: to :
+		auto xml_type = std::regex_replace(type(), std::regex("\\::"), ".");
+		xml_ele.SetName(xml_type.c_str());
 		if(!name().empty())xml_ele.SetAttribute("name", name().c_str());
 		for (auto &ele : children())
 		{
@@ -351,7 +354,9 @@ namespace aris::core
 	}
 	auto Object::loadXml(const aris::core::XmlElement &xml_ele)->void
 	{
-		if (type() != xml_ele.Name()) THROW_FILE_LINE("failed in Object::loadXml : you can't use a \"" + type() + "\" to load a \"" + xml_ele.Name() + "\" xml element");
+		auto c_type = std::regex_replace(xml_ele.Name(), std::regex("\\."), "::");
+		
+		if (type() != c_type) THROW_FILE_LINE("failed in Object::loadXml : you can't use a \"" + type() + "\" to load a \"" + xml_ele.Name() + "\" xml element");
 
 		// set name and default child type //
 		imp_->name_ = xml_ele.Attribute("name") ? xml_ele.Attribute("name") : "";
@@ -360,7 +365,7 @@ namespace aris::core
 		children().clear();
 		for (auto ele = xml_ele.FirstChildElement(); ele; ele = ele->NextSiblingElement())
 		{
-			std::string type = ele->Name();
+			auto type = std::regex_replace(ele->Name(), std::regex("\\."), "::");
 
 			auto info = imp_->getTypeInfo(type);
 			if (info == nullptr)THROW_FILE_LINE("unrecognized type \"" + type + "\" in Object::loadXml");
@@ -532,5 +537,11 @@ namespace aris::core
 		imp_->name_ = std::move(other.imp_->name_);
 		imp_->type_map_ = std::move(other.imp_->type_map_);
 		return *this;
+	}
+
+	ARIS_REGISTRATION
+	{
+		aris::core::class_<Object>("Object")
+			.property("name", &Object::setName, &Object::name);
 	}
 }

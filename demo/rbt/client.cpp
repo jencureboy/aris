@@ -30,24 +30,41 @@ int sendRequest(int argc, char *argv[])
 
 	// 连接并发送msg //
 	aris::core::Socket client("client");
-	client.setConnectType(aris::core::Socket::TCP);
+	client.setConnectType(aris::core::Socket::WEB);
     client.setRemoteIP("127.0.0.1");
-    client.setPort("5867");
+    client.setPort("5866");
 	
 
 	while (true)
 	{
 		try
 		{
-            client.connect();
-			client.sendMsg(msg);
-			break;
+			client.connect();
 		}
 		catch (std::exception &)
 		{
 			std::cout << "failed to connect server, will retry in 1 second" << std::endl;
             std::this_thread::sleep_for(std::chrono::seconds(1));
+			continue;
 		}
+
+		try
+		{
+			//client.sendMsg(aris::core::Msg("aaa"));
+			client.sendRawData("aaaa", 5);
+			//client.sendRawData("\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0aaaaaaaaaaaaaaaaaaaa", 41);
+			std::cout << "send success" << std::endl;
+
+			break;
+		}
+		catch (std::exception &e)
+		{
+			std::cout << e.what() << std::endl;
+			std::this_thread::sleep_for(std::chrono::seconds(1));
+			break;
+		}
+
+		
 
 	}
 

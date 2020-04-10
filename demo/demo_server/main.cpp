@@ -1,5 +1,7 @@
 ﻿#include <iostream>
 #include <aris.hpp>
+#include <regex>
+#include <charconv>
 
 using namespace aris::dynamic;
 using namespace aris::robot;
@@ -13,8 +15,8 @@ void PIDcalOne(double m, double ts, double *KP)
 //系统传递函数H(s)=1/(ms+h)
 void PIDcalTeo(double m, double h, double ts, double overshoot, double *KP, double *KI)
 {
-	double temp = log(overshoot);
-	double kesi = 1 / sqrt(1 + aris::PI*aris::PI / temp / temp);
+	double temp = std::log(overshoot);
+	double kesi = 1 / sqrt(1 + aris::PI * aris::PI / temp / temp);
 	double omega = 4 / kesi / ts;
 
 	KI[0] = omega * omega * m;
@@ -99,6 +101,10 @@ int main(int argc, char *argv[])
 	std::cout << cs.controller().xmlString() << std::endl;
 
 	auto &m = cs.model();
+	m.init();
+
+	auto &c = m.calculator();
+
 	double mp[6]{ 0,0,0,0,1.57,0 };
 	double mv[6]{ 0.001,0.02,0.01,0.04,0.01,0.02 };
 	double ma[6]{ 0.1,0.2,0.3,0.4,0.5,0.6 };
@@ -205,22 +211,6 @@ int main(int argc, char *argv[])
 	//dsp(1, 6, max_value);
 
 
-
-	
-
-
-
-	//dsp(sd.nM(), sd.nM(), sd.M());
-	//dsp(s.nM(), s.nM(), s.M());
-
-	s.Jf();
-	s.M();
-
-
-
-
-
-
 	////////////////////////////////////////////////////////////////////////////////////
 	//aris::dynamic::SevenAxisParam param;
 
@@ -234,88 +224,11 @@ int main(int argc, char *argv[])
 	//dynamic_cast<aris::control::EthercatMotor&>(cs.controller().slaveAtAbs(1)).setMinPos(-0.1);
 	//dynamic_cast<aris::control::EthercatMotor&>(cs.controller().slaveAtAbs(1)).setMaxPos(0.1);
 	////////////////////////////////////////////////////////////////////////////////////
-	/*
-	cs.planRoot().planPool().add<aris::plan::UniversalPlan>("tt", [&](const std::map<std::string, std::string> &, aris::plan::Plan &t)->void
-	{
-		auto ct = cs.currentCollectTarget();
-
-		t.ret = std::vector<std::pair<std::string, std::any>>();
-
-		if (ct)
-		{
-			std::cout << "current plan:" << ct->plan->name() << std::endl;
-		}
-		else
-		{
-			std::cout << "no current plan" << std::endl;
-		}
-		
-		//t.option = aris::plan::Plan::NOT_RUN_EXECUTE_FUNCTION;
-	}, [&](aris::plan::Plan &plan)->int
-	{
-		if (plan.count() == 1)plan.controller()->logFileRawName("test");
-		
-		plan.controller()->lout() << plan.count() << "\n";
-
-		plan.controller()->motionAtAbs(0).setTargetPos(plan.count()*0.002);
-		return 100LL - plan.count();
-	}, [&](aris::plan::Plan &)->void
-	{
-		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-	}, "<Command name=\"tt\"/>");
-	*/
 
 	// make log file has enough space
 	cs.planRoot().planPool().add<aris::plan::RemoveFile>("remove_file");
-
-
-	//try 
-	//{
-	//	cs.executeCmd(aris::core::Msg("set_xml --xml={<ControlServer><EthercatController name=\"ethercat_controller\"><SlavePoolObject name=\"slave_pool\"><EthercatSlave phy_id=\"0\"   revision_num=\"0x00029001\" dc_assign_activate=\"0x00000000\"> <SyncManagerPoolObject><SyncManager is_tx=\"true\"></SyncManager><SyncManager is_tx=\"true\"></SyncManager><SyncManager is_tx=\"true\"><Pdo name=\"pdo\" index=\"0x1600\"><PdoEntry name=\"entry\" index=\"0x6040\"  subindex=\"0x00\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x6060\"  subindex=\"0x00\" size=\"8\" /><PdoEntry name=\"entry\" index=\"0x607a\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x60ff\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x6071\"  subindex=\"0x00\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x60b1\"  subindex=\"0x00\" size=\"32\" /></Pdo></SyncManager><SyncManager is_tx=\"true\"><Pdo name=\"pdo\" index=\"0x1a00\"><PdoEntry name=\"entry\" index=\"0x6041\"  subindex=\"0x00\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x6061\"  subindex=\"0x00\" size=\"8\" /><PdoEntry name=\"entry\" index=\"0x6064\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x606c\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x6077\"  subindex=\"0x00\" size=\"16\" /></Pdo></SyncManager></SyncManagerPoolObject></EthercatSlave><EthercatSlave phy_id=\"1\"   revision_num=\"0x00029001\" dc_assign_activate=\"0x00000000\"> <SyncManagerPoolObject><SyncManager is_tx=\"false\"></SyncManager><SyncManager is_tx=\"true\"></SyncManager><SyncManager is_tx=\"false\"><Pdo name=\"pdo\" index=\"0x1600\"><PdoEntry name=\"entry\" index=\"0x6040\"  subindex=\"0x00\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x6060\"  subindex=\"0x00\" size=\"8\" /><PdoEntry name=\"entry\" index=\"0x607a\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x60ff\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x6071\"  subindex=\"0x00\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x60b1\"  subindex=\"0x00\" size=\"32\" /></Pdo></SyncManager><SyncManager is_tx=\"true\"><Pdo name=\"pdo\" index=\"0x1a00\"><PdoEntry name=\"entry\" index=\"0x6041\"  subindex=\"0x00\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x6061\"  subindex=\"0x00\" size=\"8\" /><PdoEntry name=\"entry\" index=\"0x6064\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x606c\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x6077\"  subindex=\"0x00\" size=\"16\" /></Pdo></SyncManager></SyncManagerPoolObject></EthercatSlave><EthercatSlave phy_id=\"2\"   revision_num=\"0x00029001\" dc_assign_activate=\"0x00000000\"> <SyncManagerPoolObject><SyncManager is_tx=\"false\"></SyncManager><SyncManager is_tx=\"true\"></SyncManager><SyncManager is_tx=\"false\"><Pdo name=\"pdo\" index=\"0x1600\"><PdoEntry name=\"entry\" index=\"0x6040\"  subindex=\"0x00\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x6060\"  subindex=\"0x00\" size=\"8\" /><PdoEntry name=\"entry\" index=\"0x607a\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x60ff\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x6071\"  subindex=\"0x00\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x60b1\"  subindex=\"0x00\" size=\"32\" /></Pdo></SyncManager><SyncManager is_tx=\"true\"><Pdo name=\"pdo\" index=\"0x1a00\"><PdoEntry name=\"entry\" index=\"0x6041\"  subindex=\"0x00\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x6061\"  subindex=\"0x00\" size=\"8\" /><PdoEntry name=\"entry\" index=\"0x6064\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x606c\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x6077\"  subindex=\"0x00\" size=\"16\" /></Pdo></SyncManager></SyncManagerPoolObject></EthercatSlave><EthercatSlave phy_id=\"3\"   revision_num=\"0x00029001\" dc_assign_activate=\"0x00000000\"> <SyncManagerPoolObject><SyncManager is_tx=\"false\"></SyncManager><SyncManager is_tx=\"true\"></SyncManager><SyncManager is_tx=\"false\"><Pdo name=\"pdo\" index=\"0x1600\"><PdoEntry name=\"entry\" index=\"0x6040\"  subindex=\"0x00\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x6060\"  subindex=\"0x00\" size=\"8\" /><PdoEntry name=\"entry\" index=\"0x607a\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x60ff\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x6071\"  subindex=\"0x00\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x60b1\"  subindex=\"0x00\" size=\"32\" /></Pdo></SyncManager><SyncManager is_tx=\"true\"><Pdo name=\"pdo\" index=\"0x1a00\"><PdoEntry name=\"entry\" index=\"0x6041\"  subindex=\"0x00\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x6061\"  subindex=\"0x00\" size=\"8\" /><PdoEntry name=\"entry\" index=\"0x6064\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x606c\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x6077\"  subindex=\"0x00\" size=\"16\" /></Pdo></SyncManager></SyncManagerPoolObject></EthercatSlave><EthercatSlave phy_id=\"4\"   revision_num=\"0x00029001\" dc_assign_activate=\"0x00000000\"> <SyncManagerPoolObject><SyncManager is_tx=\"false\"></SyncManager><SyncManager is_tx=\"true\"></SyncManager><SyncManager is_tx=\"false\"><Pdo name=\"pdo\" index=\"0x1600\"><PdoEntry name=\"entry\" index=\"0x6040\"  subindex=\"0x00\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x6060\"  subindex=\"0x00\" size=\"8\" /><PdoEntry name=\"entry\" index=\"0x607a\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x60ff\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x6071\"  subindex=\"0x00\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x60b1\"  subindex=\"0x00\" size=\"32\" /></Pdo></SyncManager><SyncManager is_tx=\"true\"><Pdo name=\"pdo\" index=\"0x1a00\"><PdoEntry name=\"entry\" index=\"0x6041\"  subindex=\"0x00\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x6061\"  subindex=\"0x00\" size=\"8\" /><PdoEntry name=\"entry\" index=\"0x6064\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x606c\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x6077\"  subindex=\"0x00\" size=\"16\" /></Pdo></SyncManager></SyncManagerPoolObject></EthercatSlave><EthercatSlave phy_id=\"5\"   revision_num=\"0x00029001\" dc_assign_activate=\"0x00000000\"> <SyncManagerPoolObject><SyncManager is_tx=\"false\"></SyncManager><SyncManager is_tx=\"true\"></SyncManager><SyncManager is_tx=\"false\"><Pdo name=\"pdo\" index=\"0x1600\"><PdoEntry name=\"entry\" index=\"0x6040\"  subindex=\"0x00\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x6060\"  subindex=\"0x00\" size=\"8\" /><PdoEntry name=\"entry\" index=\"0x607a\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x60ff\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x6071\"  subindex=\"0x00\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x60b1\"  subindex=\"0x00\" size=\"32\" /></Pdo></SyncManager><SyncManager is_tx=\"true\"><Pdo name=\"pdo\" index=\"0x1a00\"><PdoEntry name=\"entry\" index=\"0x6041\"  subindex=\"0x00\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x6061\"  subindex=\"0x00\" size=\"8\" /><PdoEntry name=\"entry\" index=\"0x6064\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x606c\"  subindex=\"0x00\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x6077\"  subindex=\"0x00\" size=\"16\" /></Pdo></SyncManager></SyncManagerPoolObject></EthercatSlave><EthercatSlave phy_id=\"6\"   revision_num=\"0x00000001\" dc_assign_activate=\"0x00000000\"> <SyncManagerPoolObject><SyncManager is_tx=\"false\"></SyncManager><SyncManager is_tx=\"true\"></SyncManager><SyncManager is_tx=\"false\"><Pdo name=\"pdo\" index=\"0x1601\"><PdoEntry name=\"entry\" index=\"0x7010\"  subindex=\"0x01\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x7010\"  subindex=\"0x02\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x7010\"  subindex=\"0x03\" size=\"16\" /></Pdo></SyncManager><SyncManager is_tx=\"true\"><Pdo name=\"pdo\" index=\"0x1a03\"><PdoEntry name=\"entry\" index=\"0x6030\"  subindex=\"0x00\" size=\"16\" /><PdoEntry name=\"entry\" index=\"0x6030\"  subindex=\"0x01\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x6030\"  subindex=\"0x02\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x6030\"  subindex=\"0x03\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x6030\"  subindex=\"0x04\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x6030\"  subindex=\"0x05\" size=\"32\" /><PdoEntry name=\"entry\" index=\"0x6030\"  subindex=\"0x06\" size=\"32\" /></Pdo></SyncManager></SyncManagerPoolObject></EthercatSlave></SlavePoolObject></EthercatController></ControlServer>}"));
-	//}
-	//catch (std::exception &e)
-	//{
-	//	std::cout << e.what() << std::endl;
-	//}
-	
-
-
-	//cs.start();
-
-	//for (int i = 0; i < 1000; ++i)
-	//{
-	//	cs.executeCmd(aris::core::Msg("en --limit_time=1"));
-	//}
-
-
-	try
-	{
-		cs.executeCmd("rmFi --filePath=/home/kaanh/log --memo=20000");
-	}
-	catch (std::exception &e)
-	{
-		std::cout << e.what() << std::endl;
-	}
 	cs.planRoot().planPool().add<aris::plan::MoveSeries>("move_series");
-
-	/*
-	auto ec_ptr = std::make_unique<aris::control::EthercatController>();
-	ec_ptr->setEsiDirs({
-		std::filesystem::path("C:\\Users\\py033\\Desktop\\esi_dirs"),
-		std::filesystem::path("C:\\Users\\py033\\Desktop\\esi_dirs\\Beckhoff AX5xxx")
-		});
-
-	auto str = ec_ptr->xmlString();
-	std::cout << str << std::endl;
-	ec_ptr->loadXmlStr(str);
-	std::cout << ec_ptr->xmlString() << std::endl;
-
-	ec_ptr->updateDeviceList();
-
-	std::cout << ec_ptr->getDeviceList() << std::endl;
-	std::cout << ec_ptr->getPdoList(0x000002E1, 0x00, 0x29001) << std::endl;
-	std::cout << ec_ptr->getPdoList(0x0000009A, 0x00030924, 0x000103f4) << std::endl;
-	*/
+	cs.planRoot().planPool().add<aris::server::GetInfo>();
 
 	// interaction //
 	cs.interfacePool().add<aris::server::ProgramWebInterface>("", "5866", aris::core::Socket::WEB);
@@ -325,9 +238,10 @@ int main(int argc, char *argv[])
 
 	for (auto &m : cs.controller().slavePool()) dynamic_cast<aris::control::EthercatMotor&>(m).setVirtual(true);
 
-	//cs.saveXmlFile("C:\\Users\\py033\\Desktop\\test.xml");
-	//cs.loadXmlFile("C:\\Users\\py033\\Desktop\\test.xml");
+	cs.saveXmlFile("C:\\Users\\py033\\Desktop\\test.xml");
+	cs.loadXmlFile("C:\\Users\\py033\\Desktop\\test.xml");
 
+	cs.init();
 	cs.open();
 	cs.runCmdLine();
 	

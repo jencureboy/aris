@@ -29,7 +29,6 @@ namespace aris::server
 		auto root = xml_ele.DeepClone(&doc_);
 		doc_.InsertEndChild(root);
 	}
-
 	Interface::Interface(const std::string &name) :Object(name) {}
 
 	auto parse_ret_value(std::vector<std::pair<std::string, std::any>> &ret)->std::string
@@ -49,7 +48,7 @@ namespace aris::server
 			ARIS_SET_TYPE(std::vector<double>)
 			ARIS_SET_TYPE(std::vector<std::string>)
 			{
-				std::cout << "unrecognized return value" << std::endl;
+				ARIS_COUT << "unrecognized return value" << std::endl;
 			}
 
 #undef ARIS_SET_TYPE
@@ -59,7 +58,7 @@ namespace aris::server
 	}
 	auto onReceivedMsg(aris::core::Socket *socket, aris::core::Msg &msg)->int
 	{
-		std::cout << "received " << std::endl;
+		ARIS_COUT << "received " << std::endl;
 		
 		auto msg_data = std::string_view(msg.data(), msg.size());
 
@@ -98,7 +97,7 @@ namespace aris::server
 				}
 				catch (std::exception &e)
 				{
-					std::cout << e.what() << std::endl;
+					ARIS_COUT << e.what() << std::endl;
 					LOG_ERROR << e.what() << std::endl;
 				}
 			});
@@ -110,7 +109,7 @@ namespace aris::server
 			ret_pair.push_back(std::make_pair<std::string, std::any>("return_message", std::string(e.what())));
 			std::string ret_str = parse_ret_value(ret_pair);
 
-			std::cout << ret_str << std::endl;
+			ARIS_COUT << ret_str << std::endl;
 			LOG_ERROR << ret_str << std::endl;
 
 			try
@@ -121,7 +120,7 @@ namespace aris::server
 			}
 			catch (std::exception &e)
 			{
-				std::cout << e.what() << std::endl;
+				ARIS_COUT << e.what() << std::endl;
 				LOG_ERROR << e.what() << std::endl;
 			}
 		}
@@ -130,7 +129,7 @@ namespace aris::server
 	}
 	auto onReceivedConnection(aris::core::Socket *sock, const char *ip, int port)->int
 	{
-		std::cout << "socket receive connection" << std::endl;
+		ARIS_COUT << "socket receive connection" << std::endl;
 		LOG_INFO << "socket receive connection:\n"
 			<< std::setw(aris::core::LOG_SPACE_WIDTH) << "|" << "  ip:" << ip << "\n"
 			<< std::setw(aris::core::LOG_SPACE_WIDTH) << "|" << "port:" << port << std::endl;
@@ -138,7 +137,7 @@ namespace aris::server
 	}
 	auto onLoseConnection(aris::core::Socket *socket)->int
 	{
-		std::cout << "socket lose connection" << std::endl;
+		ARIS_COUT << "socket lose connection" << std::endl;
 		LOG_INFO << "socket lose connection" << std::endl;
 		for (;;)
 		{
@@ -149,12 +148,12 @@ namespace aris::server
 			}
 			catch (std::runtime_error &e)
 			{
-				std::cout << e.what() << std::endl << "will try to restart server socket in 1s" << std::endl;
+				ARIS_COUT << e.what() << std::endl << "will try to restart server socket in 1s" << std::endl;
 				LOG_ERROR << e.what() << std::endl << "will try to restart server socket in 1s" << std::endl;
 				std::this_thread::sleep_for(std::chrono::seconds(1));
 			}
 		}
-		std::cout << "socket restart successful" << std::endl;
+		ARIS_COUT << "socket restart successful" << std::endl;
 		LOG_INFO << "socket restart successful" << std::endl;
 
 		return 0;
@@ -178,15 +177,18 @@ namespace aris::server
 		sock_->setOnReceivedConnection(onReceivedConnection);
 		sock_->setOnLoseConnection(onLoseConnection);
 	}
-
+#define ARIS_PRO_COUT ARIS_COUT << "pro "
 	struct ProgramWebInterface::Imp
 	{
 		aris::core::CommandParser command_parser_;
 		aris::core::LanguageParser language_parser_;
 		aris::core::Calculator calculator_;
 		std::thread auto_thread_;
-		std::atomic<int> current_line_;
+		std::atomic<int> current_line_{0};
 		bool is_auto_mode_{ false };
+
+		std::string last_error_;
+		int last_error_code_{ 0 }, last_error_line_{0};
 
 		std::atomic_bool is_stop_{ false }, is_pause_{ false };
 
@@ -205,8 +207,13 @@ namespace aris::server
 		sock_->setOnReceivedConnection(imp_->onReceiveConnection_);
 		sock_->setOnLoseConnection(imp_->onLoseConnection_);
 	}
-	auto ProgramWebInterface::isAutoRunning()->bool { return imp_->auto_thread_.joinable(); }
+	auto ProgramWebInterface::lastError()->std::string { return imp_->last_error_; }
+	auto ProgramWebInterface::lastErrorCode()->int { return imp_->last_error_code_; }
+	auto ProgramWebInterface::lastErrorLine()->int { return imp_->last_error_line_; }
 	auto ProgramWebInterface::isAutoMode()->bool { return imp_->is_auto_mode_; }
+	auto ProgramWebInterface::isAutoRunning()->bool { return imp_->auto_thread_.joinable(); }
+	auto ProgramWebInterface::isAutoPaused()->bool { return imp_->is_pause_.load(); }
+	auto ProgramWebInterface::isAutoStopped()->bool { return imp_->is_stop_.load(); }
 	auto ProgramWebInterface::currentLine()->int { return imp_->current_line_.load(); }
 	ProgramWebInterface::ProgramWebInterface(const std::string &name, const std::string &port, aris::core::Socket::TYPE type) :Interface(name), imp_(new Imp)
 	{
@@ -221,6 +228,7 @@ namespace aris::server
 			"	<Param name=\"start\"/>"
 			"	<Param name=\"pause\"/>"
 			"	<Param name=\"stop\"/>"
+			"	<Param name=\"clear_error\"/>"
 			"	<Param name=\"forward\"/>"
 			"</Command>");
 		imp_->command_parser_.commandPool().add<aris::core::Command>(program);
@@ -238,7 +246,7 @@ namespace aris::server
 				}
 				catch (std::exception &e)
 				{
-					std::cout << e.what() << std::endl;
+					ARIS_COUT << e.what() << std::endl;
 					LOG_ERROR << e.what() << std::endl;
 				}
 			};
@@ -249,9 +257,9 @@ namespace aris::server
 				js["return_message"] = ret_msg_str;
 
 				aris::core::Msg ret_msg = msg;
-				ret_msg.copy(js.dump(2));
+				ret_msg.copy(js.dump(-1));
 
-				std::cout << ret_msg.toString() << std::endl;
+				ARIS_PRO_COUT << "---" << ret_msg.toString() << std::endl;
 
 				send_ret(ret_msg);
 			};
@@ -274,6 +282,9 @@ namespace aris::server
 
 			if (cmd == "program")
 			{
+				ARIS_PRO_COUT <<"---"<< msg_data << std::endl;
+				LOG_INFO << "pro ---" << msg_data << std::endl;
+				
 				for (auto &[param, value] : params)
 				{
 					if (param == "set_auto")
@@ -305,6 +316,10 @@ namespace aris::server
 						}
 						else
 						{
+							imp_->last_error_.clear();
+							imp_->last_error_code_ = 0;
+							imp_->last_error_line_ = 0;
+							
 							auto begin_pos = value.find("{");
 							auto end_pos = value.rfind("}");
 							auto cmd_str = value.substr(begin_pos + 1, end_pos - 1 - begin_pos);
@@ -312,31 +327,39 @@ namespace aris::server
 							try
 							{
 								imp_->calculator_ = aris::server::ControlServer::instance().model().calculator();
-
 								auto &c = imp_->calculator_;
 								
-								c.addTypename("Load");
-								c.addFunction("Load", std::vector<std::string>{"Matrix"}, "Load", [](std::vector<std::any> params)->std::any{return params[0];});
-
 								imp_->language_parser_.setProgram(cmd_str);
 								imp_->language_parser_.parseLanguage();
 
 								for (auto &str : imp_->language_parser_.varPool())
 								{
-									std::stringstream ss(str);
-									std::string var;
-									ss >> var;
-									std::string type;
-									ss >> type;
-									std::string var_name;
-									ss >> var_name;
-									std::string equal;
-									ss >> equal;
+									auto cut_str = [](std::string_view &input, const char *c)->std::string_view
+									{
+										// 此时c中字符是或的关系 //
+										auto point = input.find_first_of(c);
+										auto ret = input.substr(0, point);
+										input = point == std::string::npos ? std::string_view() : input.substr(point);
+										return ret;
+									};
+									auto trim_left = [](std::string_view &input, const char *c)->std::string_view
+									{
+										auto point = input.find_first_not_of(c);
+										return point == std::string::npos ? std::string_view() : input.substr(point, std::string::npos);
+									};
+									
+									std::string_view input = str;
+									if (auto var = cut_str(input, " "); cmd.empty())THROW_FILE_LINE("invalid command string: please at least contain a word");
+									input = trim_left(input, " ");
 
+									auto type = cut_str(input, " ");
+									input = trim_left(input, " ");
 
-									std::string value;
-									std::getline(ss, value);
-									c.addVariable(var_name, type, c.calculateExpression(value).second);
+									auto name = cut_str(input, " =");
+									input = trim_left(input, " =");
+
+									auto value = input;
+									c.addVariable(name, type, c.calculateExpression(std::string(type) + "(" + std::string(value) + ")").second);
 								}
 
 								send_code_and_msg(0, std::string());
@@ -344,7 +367,8 @@ namespace aris::server
 							}
 							catch (std::exception &e)
 							{
-								std::cout << e.what() << std::endl;
+								ARIS_COUT << e.what() << std::endl;
+								LOG_ERROR << "pro ---" << msg_data << std::endl;
 								send_code_and_msg(aris::plan::Plan::PROGRAM_EXCEPTION, e.what());
 								return 0;
 							}
@@ -384,6 +408,7 @@ namespace aris::server
 						else
 						{
 							imp_->language_parser_.gotoMain();
+							imp_->current_line_.store(imp_->language_parser_.currentLine());
 							send_code_and_msg(0, "");
 							return 0;
 						}
@@ -393,6 +418,8 @@ namespace aris::server
 					}
 					else if (param == "start")
 					{
+						LOG_INFO << "pro now start" << std::endl;
+						
 						if (!isAutoMode())
 						{
 							send_code_and_msg(aris::plan::Plan::PROGRAM_EXCEPTION, "can not start program in manual mode");
@@ -404,6 +431,11 @@ namespace aris::server
 							send_code_and_msg(0, "");
 							return 0;
 						}
+						else if (lastErrorCode())
+						{
+							send_code_and_msg(lastErrorCode(), lastError());
+							return 0;
+						}
 						else
 						{
 							imp_->is_pause_.store(false);
@@ -411,86 +443,156 @@ namespace aris::server
 
 							imp_->auto_thread_ = std::thread([&]()->void
 							{
-								auto&cs = aris::server::ControlServer::instance();
+								// 交换calculator，保证每个程序开始时的变量都是之前的 //
+								std::swap(imp_->calculator_, aris::server::ControlServer::instance().model().calculator());
+								auto &c = aris::server::ControlServer::instance().model().calculator();
+								auto &cs = aris::server::ControlServer::instance();
 								imp_->current_line_.store(imp_->language_parser_.currentLine());
+								std::vector < std::pair<std::string_view, std::function<void(aris::plan::Plan&)>> > cmd_vec;
+								std::vector <int> lines;
 
-								int err_code_ = 0;
-								std::string err_msg_;
-
-								for (; !imp_->language_parser_.isEnd();)
+								for (int has_error{ 0 }; has_error == 0 && (!imp_->language_parser_.isEnd());)
 								{
-									if (imp_->is_stop_.load() == true)
-									{
-										break;
-									}
-									else if (imp_->is_pause_.load() == true)
+									if (imp_->is_stop_.load() == true)break;
+									if (imp_->is_pause_.load() == true)
 									{
 										std::this_thread::sleep_for(std::chrono::milliseconds(1));
 										continue;
 									}
 
+									// 碰到断点时才真正执行 //
+									auto server_execute = [&]() ->int
+									{
+										auto plans = cs.executeCmdInCmdLine(cmd_vec);
+										for (int i = 0; i < plans.size(); ++i)
+										{
+											ARIS_PRO_COUT << lines[i] << "---" << plans[i]->cmdId() << "---" << plans[i]->cmdString() << std::endl;
+											LOG_INFO << "pro " << lines[i] << "---" << plans[i]->cmdId() << "---" << plans[i]->cmdString() << std::endl;
+										}
+										cs.waitForAllCollection();
+										for (int i = 0; i < plans.size(); ++i)
+										{
+											// 如果因为其他轨迹出错而取消 //
+											if (plans[i]->retCode() == aris::plan::Plan::PREPARE_CANCELLED || plans[i]->retCode() == aris::plan::Plan::EXECUTE_CANCELLED)
+											{
+												ARIS_PRO_COUT << lines[i] << "---" << plans[i]->cmdId() << "---canceled" << std::endl;
+												LOG_ERROR << "pro " << lines[i] << "---" << plans[i]->cmdId() << "---canceled" << std::endl;
+											}
+											else if (plans[i]->retCode() < 0)
+											{
+												imp_->last_error_code_ = plans[i]->retCode();
+												imp_->last_error_ = plans[i]->retMsg();
+												imp_->last_error_line_ = lines[i];
+												ARIS_PRO_COUT << imp_->last_error_line_ << "---" << plans[i]->cmdId() << "---err_code:" << imp_->last_error_code_ << "  err_msg:" << imp_->last_error_ << std::endl;
+												LOG_ERROR << "pro " << imp_->last_error_line_ << "---" << plans[i]->cmdId() << "---err_code:" << imp_->last_error_code_ << "  err_msg:" << imp_->last_error_ << std::endl;
+												has_error = -1;
+											}
+										}
+										cmd_vec.clear();
+										lines.clear();
+										plans.clear();
+										return has_error;
+									};
+
 									if (imp_->language_parser_.isCurrentLineKeyWord())
 									{
-										cs.waitForAllCollection();
-
-										auto cmd_name = imp_->language_parser_.currentCmd().substr(0, imp_->language_parser_.currentCmd().find_first_of(" \t\n\r\f\v("));
-										auto cmd_value = imp_->language_parser_.currentCmd().find_first_of(" \t\n\r\f\v(") == std::string::npos ? "" :
-											imp_->language_parser_.currentCmd().substr(imp_->language_parser_.currentCmd().find_first_of(" \t\n\r\f\v("), std::string::npos);
-
-										if (cmd_name == "if" || cmd_name == "while")
+										if (server_execute())continue;
+										ARIS_PRO_COUT << imp_->language_parser_.currentLine() << "---" << imp_->language_parser_.currentCmd() << std::endl;
+										LOG_INFO << "pro " << imp_->language_parser_.currentLine() << "---" << imp_->language_parser_.currentCmd() << std::endl;
+										if (imp_->language_parser_.currentWord() == "if" || imp_->language_parser_.currentWord() == "while")
 										{
-											auto ret = this->imp_->calculator_.calculateExpression(cmd_value);
+											try 
+											{
+												auto ret = c.calculateExpression(imp_->language_parser_.currentParamStr());
 
-											if (auto ret_double = std::any_cast<double>(&ret.second))
-											{
-												imp_->language_parser_.forward(*ret_double != 0.0);
+												if (auto ret_double = std::any_cast<double>(&ret.second))
+												{
+													imp_->language_parser_.forward(*ret_double != 0.0);
+													imp_->current_line_.store(imp_->language_parser_.currentLine());
+												}
+												else if (auto ret_mat = std::any_cast<aris::core::Matrix>(&ret.second))
+												{
+													imp_->language_parser_.forward(ret_mat->toDouble() != 0.0);
+													imp_->current_line_.store(imp_->language_parser_.currentLine());
+												}
+												else
+												{
+													imp_->last_error_code_ = aris::plan::Plan::PROGRAM_EXCEPTION;
+													imp_->last_error_ = "invalid expresion";
+													imp_->last_error_line_ = imp_->language_parser_.currentLine();
+													ARIS_PRO_COUT << imp_->last_error_line_ << "---err_code:" << imp_->last_error_code_ << "  err_msg:" << imp_->last_error_ << std::endl;
+													break;
+												}
 											}
-											else if(auto ret_mat = std::any_cast<aris::core::Matrix>(&ret.second))
+											catch (std::exception &e)
 											{
-												imp_->language_parser_.forward(ret_mat->toDouble() != 0.0);
-											}
-											else
-											{
-												err_code_ = -10;
-												err_msg_ = "invalid expresion";
+												imp_->last_error_code_ = -10;
+												imp_->last_error_ = e.what();
+												imp_->last_error_line_ = imp_->language_parser_.currentLine();
+												ARIS_PRO_COUT << imp_->last_error_line_ << "---err_code:" << imp_->last_error_code_ << "  err_msg:" << imp_->last_error_ << std::endl;
 												break;
 											}
 										}
 										else
 										{
 											imp_->language_parser_.forward();
+											imp_->current_line_.store(imp_->language_parser_.currentLine());
 										}
 									}
 									else if (imp_->language_parser_.isCurrentLineFunction())
 									{
-										cs.waitForAllCollection();
+										if (server_execute())continue;
+										ARIS_PRO_COUT << imp_->language_parser_.currentLine() << "---" << imp_->language_parser_.currentCmd() << std::endl;
+										LOG_INFO << "pro " << imp_->language_parser_.currentLine() << "---" << imp_->language_parser_.currentCmd() << std::endl;
 										imp_->language_parser_.forward();
+										imp_->current_line_.store(imp_->language_parser_.currentLine());
+									}
+									else if (imp_->language_parser_.currentWord() == "set")
+									{
+										if (server_execute())continue;
+										ARIS_PRO_COUT << imp_->language_parser_.currentLine() << "---" << imp_->language_parser_.currentCmd() << std::endl;
+										LOG_INFO << "pro " << imp_->language_parser_.currentLine() << "---" << imp_->language_parser_.currentCmd() << std::endl;
+										try
+										{
+											c.calculateExpression(imp_->language_parser_.currentParamStr());
+											imp_->language_parser_.forward();
+											imp_->current_line_.store(imp_->language_parser_.currentLine());
+										}
+										catch (std::exception &e)
+										{
+											imp_->last_error_code_ = aris::plan::Plan::PROGRAM_EXCEPTION;
+											imp_->last_error_ = e.what();
+											imp_->last_error_line_ = imp_->language_parser_.currentLine();
+											ARIS_PRO_COUT << imp_->last_error_line_ << "---err_code:" << imp_->last_error_code_ << "  err_msg:" << imp_->last_error_ << std::endl;
+											LOG_ERROR << "pro " << imp_->last_error_line_ << "---err_code:" << imp_->last_error_code_ << "  err_msg:" << imp_->last_error_ << std::endl;
+											has_error = -1;
+										}
 									}
 									else
 									{
-										auto cmd = imp_->language_parser_.currentCmd();
-										imp_->language_parser_.forward();
-
+										auto &cmd = imp_->language_parser_.currentCmd();
 										auto current_line = imp_->language_parser_.currentLine();
-										auto ret = cs.executeCmd(cmd, [&, current_line](aris::plan::Plan &plan)->void
-										{
-											imp_->current_line_.store(current_line);
-										});
+										imp_->language_parser_.forward();
+										auto next_line = imp_->language_parser_.currentLine();
 
-										if (ret->retCode())
+										cmd_vec.push_back(std::pair<std::string_view, std::function<void(aris::plan::Plan&)>>(std::string_view(cmd), [&, current_line, next_line](aris::plan::Plan &plan)->void
 										{
-											err_code_ = ret->retCode();
-											err_msg_ = ret->retMsg();
-											break;
-										}
+											imp_->current_line_.store(next_line);
+										}));
+										lines.push_back(current_line);
 									}
+
+									if (imp_->language_parser_.isEnd()) server_execute();
 								}
-
+								
 								cs.waitForAllCollection();
+								imp_->current_line_.store(imp_->language_parser_.currentLine());
 
-								std::cout << (imp_->is_stop_.load() ? "program stopped" : "program finished") << std::endl;
-
-								while (!imp_->auto_thread_.joinable());// for windows bug:if thread init too fast, it may fail
+								std::swap(imp_->calculator_, aris::server::ControlServer::instance().model().calculator());
+								ARIS_PRO_COUT << "---" << (imp_->is_stop_.load() ? "program stopped" : "program finished") << std::endl;
+								LOG_INFO << "pro " << "---" << (imp_->is_stop_.load() ? "program stopped" : "program finished") << std::endl;
+								
+								while (!imp_->auto_thread_.joinable());
 								imp_->auto_thread_.detach();
 							});
 							send_code_and_msg(0, "");
@@ -530,6 +632,27 @@ namespace aris::server
 							return 0;
 						}
 					}
+					else if (param == "clear_error")
+					{
+						if (isAutoRunning())
+						{
+							send_code_and_msg(aris::plan::Plan::PROGRAM_EXCEPTION, "can not clear error when running");
+							return 0;
+						}
+						else
+						{
+							imp_->last_error_.clear();
+							imp_->last_error_code_ = 0;
+							imp_->last_error_line_ = 0;
+							send_code_and_msg(0, "");
+							return 0;
+						}
+					}
+					else
+					{
+						send_code_and_msg(aris::plan::Plan::PROGRAM_EXCEPTION, "invalid program option");
+						return 0;
+					}
 				}
 			}
 			else
@@ -561,7 +684,7 @@ namespace aris::server
 		};
 		imp_->onReceiveConnection_ = [](aris::core::Socket *sock, const char *ip, int port)->int
 		{
-			std::cout << "socket receive connection" << std::endl;
+			ARIS_COUT << "socket receive connection" << std::endl;
 			LOG_INFO << "socket receive connection:\n"
 				<< std::setw(aris::core::LOG_SPACE_WIDTH) << "|" << "  ip:" << ip << "\n"
 				<< std::setw(aris::core::LOG_SPACE_WIDTH) << "|" << "port:" << port << std::endl;
@@ -569,7 +692,7 @@ namespace aris::server
 		};
 		imp_->onLoseConnection_ = [](aris::core::Socket *socket)->int
 		{
-			std::cout << "socket lose connection" << std::endl;
+			ARIS_COUT << "socket lose connection" << std::endl;
 			LOG_INFO << "socket lose connection" << std::endl;
 			for (;;)
 			{
@@ -580,12 +703,12 @@ namespace aris::server
 				}
 				catch (std::runtime_error &e)
 				{
-					std::cout << e.what() << std::endl << "will try to restart server socket in 1s" << std::endl;
+					ARIS_COUT << e.what() << std::endl << "will try to restart server socket in 1s" << std::endl;
 					LOG_ERROR << e.what() << std::endl << "will try to restart server socket in 1s" << std::endl;
 					std::this_thread::sleep_for(std::chrono::seconds(1));
 				}
 			}
-			std::cout << "socket restart successful" << std::endl;
+			ARIS_COUT << "socket restart successful" << std::endl;
 			LOG_INFO << "socket restart successful" << std::endl;
 
 			return 0;
@@ -597,6 +720,27 @@ namespace aris::server
 	}
 	ProgramWebInterface::ProgramWebInterface(ProgramWebInterface && other) = default;
 	ProgramWebInterface& ProgramWebInterface::operator=(ProgramWebInterface&& other) = default;
+
+	auto GetInfo::prepareNrt()->void
+	{
+		auto &cs = *controlServer();
+		auto &inter = dynamic_cast<aris::server::ProgramWebInterface&>(cs.interfacePool().at(0));
+
+		std::vector<std::pair<std::string, std::any>> ret;
+		ret.push_back(std::make_pair(std::string("cs_err_code"), std::make_any<int>(cs.errorCode())));
+		ret.push_back(std::make_pair(std::string("cs_err_msg"), std::make_any<std::string>(cs.errorMsg())));
+		ret.push_back(std::make_pair(std::string("pro_err_code"), std::make_any<int>(inter.lastErrorCode())));
+		ret.push_back(std::make_pair(std::string("pro_err_msg"), std::make_any<std::string>(inter.lastError())));
+		ret.push_back(std::make_pair(std::string("pro_err_line"), std::make_any<int>(inter.lastErrorLine())));
+		ret.push_back(std::make_pair(std::string("auto_mode"), std::make_any<int>(inter.isAutoMode())));
+		ret.push_back(std::make_pair(std::string("auto_run"), std::make_any<int>(inter.isAutoRunning())));
+		ret.push_back(std::make_pair(std::string("line"), std::make_any<int>(inter.currentLine())));
+
+		auto ret_str = parse_ret_value(ret);
+		std::copy(ret_str.begin(), ret_str.end(), const_cast<char*>(this->retMsg()));
+
+		this->option() = aris::plan::Plan::NOT_RUN_EXECUTE_FUNCTION | aris::plan::Plan::NOT_RUN_COLLECT_FUNCTION | aris::plan::Plan::NOT_PRINT_CMD_INFO;
+	}
 }
 
 

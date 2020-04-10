@@ -145,30 +145,6 @@ namespace aris::core
 		return combineColMatrices(mat_col_list);
 	}
 
-	//class Calculator
-	//{
-	//public:
-	//	auto calculateExpression(std::string_view expression) const->Matrix;
-	//	auto evaluateExpression(const std::string &expression)const->std::string;
-	//	auto addVariable(const std::string &name, const Matrix &value)->void;
-	//	auto addVariable(const std::string &name, const std::string &value)->void;
-	//	auto addFunction(const std::string &name, std::function<Matrix(std::vector<Matrix>)> f, Size n)->void;
-	//	auto clearVariables()->void;
-
-	//	virtual ~Calculator();
-	//	explicit Calculator(const std::string &name = "");
-	//	Calculator(const Calculator &);
-	//	Calculator(Calculator &&);
-	//	Calculator& operator=(const Calculator &);
-	//	Calculator& operator=(Calculator &&);
-	//private:
-	//	struct Imp;
-	//	aris::core::ImpPtr<Imp> imp_;
-	//};
-
-	
-
-
 	class Calculator
 	{
 	public:
@@ -188,12 +164,12 @@ namespace aris::core
 		auto addBinaryOperatorFunction(std::string_view opr, std::string_view p1_type, std::string_view p2_type, std::string_view ret_type, BinaryOperatorFunction f)->void;
 		auto clearVariables()->void;
 
+		//auto virtual loadXml(const aris::core::XmlElement &xml_ele)->void override;
+		//auto virtual saveXml(aris::core::XmlElement &xml_ele)const->void override;
 		virtual ~Calculator();
-		explicit Calculator(const std::string &name = "");
-		Calculator(const Calculator &);
-		Calculator(Calculator &&);
-		Calculator& operator=(const Calculator &);
-		Calculator& operator=(Calculator &&);
+		explicit Calculator(const std::string &name = "calculator");
+		ARIS_DECLARE_BIG_FOUR(Calculator);
+		//ARIS_REGISTER_TYPE(Calculator)
 	private:
 		struct Imp;
 		aris::core::ImpPtr<Imp> imp_;
@@ -207,8 +183,14 @@ namespace aris::core
 		auto gotoMain()->void;
 		auto gotoLine(int line)->void;
 		auto forward(bool is_this_cmd_successful = true)->void;
+		// 返回整句话，同时 trim 两侧 //
 		auto currentCmd()const->const std::string&;
+		// 返回当前的行号 //
 		auto currentLine()const->int;
+		// 返回当前行的 word //
+		auto currentWord()const->std::string_view;
+		// 返回当前行出去 word 后的部分 //
+		auto currentParamStr()const->std::string_view;
 		auto isCurrentLineKeyWord()const->bool;
 		auto isCurrentLineFunction()const->bool;
 		auto isEnd()const->bool;
@@ -221,18 +203,6 @@ namespace aris::core
 	private:
 		struct Imp;
 		aris::core::ImpPtr<Imp> imp_;
-	};
-
-	class Compiler
-	{
-	public:
-
-
-
-
-
-	private:
-		Calculator c_;
 	};
 }
 

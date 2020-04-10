@@ -4,7 +4,6 @@
 #include <stdexcept>
 #include <cstring>
 #include <algorithm>
-#include <regex>
 #include <list>
 #include <cmath>
 #include <any>
@@ -407,8 +406,6 @@ namespace aris::core
 			Type type;
 			std::string_view word;
 
-			
-
 			double num;
 			const Typename *tpn_;
 			const Variable *var;
@@ -428,7 +425,7 @@ namespace aris::core
 
 			// triml and check if empty //
 			auto next_pos = input.find_first_not_of(spaceStr);
-			input = next_pos == std::string::npos ? std::string_view() : std::string_view(input.data() + next_pos, input.size() - next_pos);
+			input = next_pos == std::string_view::npos ? std::string_view() : std::string_view(input.data() + next_pos, input.size() - next_pos);
 			if (next_pos == std::string_view::npos)return std::string_view();
 
 			// get number //
@@ -497,7 +494,6 @@ namespace aris::core
 
 		auto CaculateValueInParentheses(Iterator &begin_token, Iterator max_end_token) const->Value;
 		auto CaculateValueInBraces(Iterator &begin_token, Iterator max_end_token) const->Value;
-		auto CaculateValueInTypename(Iterator &begin_token, Iterator max_end_token) const->Value;
 		auto CaculateValueInFunction(Iterator &begin_token, Iterator max_end_token) const->Value;
 		auto CaculateValueInOperator(Iterator &begin_token, Iterator max_end_token) const->Value;
 
@@ -668,11 +664,11 @@ namespace aris::core
 			{
 				if (value.type_ == "Number")
 				{
-					mtx.back().push_back(Matrix(std::any_cast<double>(value.value_)));
+					mtx.back().push_back(Matrix(std::any_cast<double>(value.val())));
 				}
 				else if (value.type_ == "Matrix")
 				{
-					mtx.back().push_back(std::any_cast<Matrix&>(value.value_));
+					mtx.back().push_back(std::any_cast<Matrix&>(value.val()));
 				}
 				else
 				{
@@ -681,32 +677,7 @@ namespace aris::core
 			}
 		}
 		auto m = combineMatrices(mtx);
-		return Value{ std::string("Matrix"), m };
-	}
-	auto Calculator::Imp::CaculateValueInTypename(Iterator &i, Iterator max_end_token)const->Value
-	{
-		auto b_par = i + 1;
-		if (i + 1 >= max_end_token) THROW_FILE_LINE("invalid expression");
-		if (b_par->type != Token::PARENTHESIS_L)THROW_FILE_LINE("function must be followed by \"(\"");
-
-		auto e_par = FindNextOutsideToken(b_par + 1, max_end_token, Token::PARENTHESIS_R);
-
-		// get values, but values dimensions must be 1 x n //
-		auto value_mat = GetValues(b_par + 1, e_par);
-		if (value_mat.size() != 1)THROW_FILE_LINE("function \"" + std::string(i->word) + "\" + do not has invalid param type");
-
-		// transfer values to param types and param values //
-		auto params = value_mat.front();
-		std::vector<std::string> p_types(params.size());
-		std::vector<std::any> p_values(params.size());
-		for (int i = 0; i < params.size(); ++i)
-		{
-			p_types[i] = params[i].type_;
-			p_values[i] = params[i].val();
-		}
-
-		// search functions //
-		
+		return Value{ "Matrix", m };
 	}
 	auto Calculator::Imp::CaculateValueInFunction(Iterator &i, Iterator max_end_token)const->Value
 	{
@@ -731,7 +702,7 @@ namespace aris::core
 		}
 
 		// search functions //
-		auto &funs = function_map_.find(std::string(i->word))->second.funs_;
+		auto &funs = function_map_.find(i->word)->second.funs_;
 		if (auto f = std::find_if(funs.begin(), funs.end(), [&](const auto &v)->bool {return p_types.size() == std::get<0>(v).size() && std::equal(p_types.begin(), p_types.end(), std::get<0>(v).begin()); }); f == funs.end())
 		{
 			THROW_FILE_LINE("function \"" + std::string(i->word) + "\" not found");
@@ -822,12 +793,10 @@ namespace aris::core
 			THROW_FILE_LINE("\"" + std::string(tpn) + "already exists, can't add this type");
 		}
 
-		imp_->typename_map_.insert(make_pair(tpn, Imp::Typename()));
+		imp_->typename_map_.insert(std::pair(std::string(tpn), Imp::Typename()));
 
-		auto &funs = imp_->function_map_[std::string(tpn)].funs_;
-		auto p_types = std::vector<std::string>{ std::string(tpn) };
-		auto ret_type = std::string(tpn);
-		funs.push_back(std::make_tuple(p_types, std::string(tpn), [](std::vector<std::any>& v)->std::any {return v[0]; }));
+		addFunction(tpn, std::vector<std::string>{ std::string(tpn) }, tpn, [](std::vector<std::any>& v)->std::any {return v[0]; });
+		addBinaryOperatorFunction("=", tpn, tpn, tpn, [](std::any& p1, std::any&p2)->std::any {	return p1 = p2;	});
 	}
 	auto Calculator::addVariable(std::string_view var, std::string_view type, const std::any &value)->void
 	{
@@ -838,7 +807,7 @@ namespace aris::core
 			THROW_FILE_LINE("\"" + std::string(var) + "already exists, can't add this variable");
 		}
 
-		imp_->variable_map_.insert(make_pair(var, Imp::Variable{std::string(type), std::string(var), value}));
+		imp_->variable_map_.insert(std::pair(std::string(var), Imp::Variable{std::string(type), std::string(var), value}));
 	}
 	auto Calculator::addFunction(std::string_view fun, const std::vector<std::string> &params, std::string_view ret_type, BuiltInFunction f)->void
 	{
@@ -897,9 +866,18 @@ namespace aris::core
 		}
 	}
 	auto Calculator::clearVariables()->void { imp_->variable_map_.clear(); }
+	//auto Calculator::loadXml(const aris::core::XmlElement &xml_ele)->void 
+	//{
+	//	Object::loadXml(xml_ele);
+	//	imp_->variable_map_.clear();
+	//	
+	//}
+	//auto Calculator::saveXml(aris::core::XmlElement &xml_ele)const->void {}
 	Calculator::~Calculator() = default;
 	Calculator::Calculator(const std::string &name)
 	{
+		addOperator("=", 0, 0, 1);
+		
 		addTypename("String");
 		addTypename("Number");
 		addTypename("Matrix");
@@ -1084,10 +1062,7 @@ namespace aris::core
 			return std::sin(std::any_cast<double>(params[0]));
 		});
 	}
-	Calculator::Calculator(const Calculator &) = default;
-	Calculator::Calculator(Calculator &&) = default;
-	Calculator& Calculator::operator=(const Calculator &) = default;
-	Calculator& Calculator::operator=(Calculator &&) = default;
+	ARIS_DEFINE_BIG_FOUR_CPP(Calculator);
 
 	struct LanguageParser::Imp
 	{
@@ -1353,19 +1328,7 @@ namespace aris::core
 		std::list<int> function_ret_stack_;
 		std::string program_;
 	};
-	auto LanguageParser::parseLanguage()->void
-	{
-		imp_->parseEnvironment(imp_->cmd_map_.begin(), imp_->cmd_map_.end());
-
-		//for (auto &cmd : imp_->cmd_map_)
-		//{
-		//	std::cout << std::setw(4) << cmd.first << " : " << std::setw(15) << cmd.second.cmd << " | " << std::setw(5) << cmd.second.next_cmd_true_ << " | " << cmd.second.next_cmd_false_ << std::endl;
-		//}
-		//for (auto &cmd : imp_->functions_)
-		//{
-		//	std::cout << cmd.first << std::endl;
-		//}
-	}
+	auto LanguageParser::parseLanguage()->void{	imp_->parseEnvironment(imp_->cmd_map_.begin(), imp_->cmd_map_.end());}
 	auto LanguageParser::setProgram(std::string_view program)->void
 	{
 		imp_->cmd_map_.clear();
@@ -1416,6 +1379,16 @@ namespace aris::core
 	}
 	auto LanguageParser::currentLine()const->int { return imp_->current_id_; }
 	auto LanguageParser::currentCmd()const->const std::string& { return imp_->cmd_map_.at(imp_->current_id_).cmd; }
+	auto LanguageParser::currentWord()const->std::string_view
+	{
+		std::string_view v = currentCmd();
+		return v.substr(0, v.find_first_of(" \t\n\r\f\v([{}])"));
+	}
+	auto LanguageParser::currentParamStr()const->std::string_view
+	{
+		std::string_view v = currentCmd();
+		return v.substr(v.find_first_of(" \t\n\r\f\v([{}])"));
+	}
 	auto LanguageParser::isCurrentLineKeyWord()const->bool
 	{
 		auto cmd_name = currentCmd().substr(0, currentCmd().find_first_of(" \t\n\r\f\v("));

@@ -43,9 +43,14 @@ namespace aris::server
 		auto virtual open()->void override;
 		auto virtual close()->void override;
 		auto virtual loadXml(const aris::core::XmlElement &xml_ele)->void override;
-		auto isAutoRunning()->bool;
 		auto isAutoMode()->bool;
+		auto isAutoRunning()->bool;
+		auto isAutoPaused()->bool;
+		auto isAutoStopped()->bool;
 		auto currentLine()->int;
+		auto lastError()->std::string;
+		auto lastErrorCode()->int;
+		auto lastErrorLine()->int;
 
 		ProgramWebInterface(const std::string &name = "pro_interface", const std::string &port = "5866", aris::core::Socket::TYPE type = aris::core::Socket::WEB);
 		ProgramWebInterface(ProgramWebInterface && other);
@@ -57,7 +62,6 @@ namespace aris::server
 		aris::core::ImpPtr<Imp> imp_;
 		aris::core::Socket *sock_;
 	};
-
 
 	auto parse_ret_value(std::vector<std::pair<std::string, std::any>> &ret)->std::string;
 	class WebInterface :public Interface
@@ -93,6 +97,14 @@ namespace aris::server
 	private:
 		struct Imp;
 		aris::core::ImpPtr<Imp> imp_;
+	};
+
+	class GetInfo :public aris::plan::Plan
+	{
+	public:
+		auto virtual prepareNrt()->void override;
+		GetInfo() {	this->command().setName("get_i");}
+		ARIS_REGISTER_TYPE(GetInfo);
 	};
 }
 

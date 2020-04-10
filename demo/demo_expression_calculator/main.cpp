@@ -106,17 +106,18 @@ int main()
 	m = std::any_cast<aris::core::Matrix>(c.calculateExpression("{1.02,1.0,2e-2}<=1.0").second);
 	m.dsp();
 
-
-
-
 	std::cout << "-------------------------------------------------" << std::endl;
 
-
-
-
-
 	aris::core::Calculator cmp;
+	cmp.addVariable("tool_pq", "Matrix", aris::core::Matrix(1.0));
+	auto ret = cmp.calculateExpression("{tool_pq, 0.0}");
+	auto mat = std::any_cast<aris::core::Matrix&>(ret.second);
+	std::cout << mat.toString() << std::endl;
 
+	cmp.addVariable("tool_pq_s", "String", std::string("aaaa"));
+	ret = cmp.calculateExpression("tool_pq_s");
+	auto str__s = std::any_cast<std::string&>(ret.second);
+	std::cout << str__s << std::endl;
 
 	cmp.addVariable("i", "Number", double(1.0));
 	auto v1 = cmp.calculateExpression("\"++i\"");
@@ -129,7 +130,9 @@ int main()
 	//std::cout << v.first << std::endl;
 	//std::any_cast<aris::core::Matrix&>(v.second).dsp();
 
-	
+	;
+	auto v3 = cmp.calculateExpression("i = 1.523654");
+	std::cout << std::any_cast<double>(v3.second) << std::endl;
 
 
 	char aaa;
